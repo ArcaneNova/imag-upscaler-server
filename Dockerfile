@@ -41,9 +41,8 @@ COPY --from=builder /root/.local /home/appuser/.local
 RUN mkdir -p temp output weights logs \
     && chown -R appuser:appuser /app
 
-# Copy application code and startup script
+# Copy application code including startup script
 COPY . .
-COPY start-api.sh .
 RUN chmod +x start-api.sh
 
 # Set ownership
@@ -52,8 +51,8 @@ RUN chown -R appuser:appuser /app
 # Ensure app directory is recognized as a Python package
 RUN test -f app/__init__.py || echo "# Python package" > app/__init__.py
 
-# Replace the diagnostic root main.py with a proper import redirector
-RUN echo '"""Import redirector for app.main"""\nfrom app.main import app' > main.py
+# Ensure main.py exists and is properly set up (skipping if it already exists)
+RUN test -f main.py || echo '"""Import redirector for app.main"""\nfrom app.main import app' > main.py
 
 # Set environment variables
 ENV PYTHONPATH=/app
