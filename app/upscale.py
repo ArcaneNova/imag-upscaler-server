@@ -7,6 +7,8 @@ import logging
 import gc
 import psutil
 import tempfile
+import threading
+import time as time_module
 from typing import Optional, Tuple, Union
 from realesrgan import RealESRGANer
 from basicsr.archs.rrdbnet_arch import RRDBNet
@@ -19,21 +21,44 @@ logger = logging.getLogger(__name__)
 _models = {}
 _device = None
 
+# Track upscale operations for memory management
+_upscale_counter = 0
+_last_cache_clear_time = time_module.time()
+
 def get_optimal_device():
-    """Determine the best available device"""
+    """Determine the best available device with memory management"""
     global _device
     if _device is None:
         if torch.cuda.is_available():
-            _device = "cuda"
-            logger.info(f"CUDA available: {torch.cuda.get_device_name(0)}")
+            try:
+                # Check GPU memory availability before choosing it
+                free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+                free_memory_mb = free_memory / (1024 * 1024)
+                
+                if free_memory_mb > 1000:  # At least 1GB free
+                    _device = "cuda"
+                    logger.info(f"CUDA available: {torch.cuda.get_device_name(0)} with {free_memory_mb:.0f}MB free memory")
+                else:
+                    logger.warning(f"CUDA available but low memory ({free_memory_mb:.0f}MB free), falling back to CPU")
+                    _device = "cpu"
+            except Exception as e:
+                logger.warning(f"Error checking GPU memory, falling back to CPU: {e}")
+                _device = "cpu"
         else:
             _device = "cpu"
-            logger.info("Using CPU for inference")
+            logger.info("Using CPU for inference (CUDA not available)")
     return _device
 
 def get_model(scale: int = 2):
-    """Get or initialize the Real-ESRGAN model with caching"""
+    """Get or initialize the Real-ESRGAN model with caching and memory management"""
     global _models
+    
+    # Check current memory usage before loading model
+    current_memory = psutil.virtual_memory().percent
+    if current_memory > 90:
+        # If memory usage is very high, clear cache first
+        logger.warning(f"Memory usage critical ({current_memory}%), clearing model cache")
+        clear_model_cache()
     
     model_key = f"realesrgan_{scale}x"
     
@@ -55,14 +80,21 @@ def get_model(scale: int = 2):
             models_dir = os.path.join(os.getcwd(), 'weights')
             os.makedirs(models_dir, exist_ok=True)
             
-            # Initialize RealESRGANer with the correct parameters
+            # Optimize tile size based on available memory
+            # Smaller tiles use less memory but may be slower
+            tile_size = 512
+            if device == "cpu" or current_memory > 75:
+                tile_size = 256  # Use smaller tiles when memory constrained
+                logger.info(f"Using smaller tile size ({tile_size}) due to memory constraints")
+            
+            # Initialize RealESRGANer with memory-optimized parameters
             model = RealESRGANer(
                 scale=netscale,
                 model_path=os.path.join(models_dir, f'{model_name}.pth'),
                 dni_weight=None,
                 model=None,  # Let the library create the appropriate model
                 half=device == 'cuda',  # Use half precision for CUDA
-                tile=512,    # Tile size for processing large images
+                tile=tile_size,    # Tile size for processing large images
                 tile_pad=10, # Padding for tiles to avoid seams
                 pre_pad=0,   # No pre-padding needed
                 device=device
@@ -188,7 +220,7 @@ def run_upscale(
     max_dimension: int = 2048
 ):
     """
-    Enhanced upscale function with optimizations
+    Enhanced upscale function with optimizations and improved memory management
     
     Args:
         input_path: Path to input image
@@ -197,11 +229,27 @@ def run_upscale(
         face_enhance: Apply additional face enhancement
         max_dimension: Maximum input dimension before resizing
     """
+    # Check system load and adjust parameters
+    cpu_percent = psutil.cpu_percent(interval=0.1)
+    memory_percent = psutil.virtual_memory().percent
+    load_avg = psutil.getloadavg()[0] if hasattr(psutil, 'getloadavg') else 0
+    
+    # Dynamic max dimension based on system load
+    if memory_percent > 85 or load_avg > 10:
+        # Reduce resolution when system is heavily loaded
+        adjusted_max_dim = min(max_dimension, 1536)  # Max 1536px under heavy load
+        if adjusted_max_dim != max_dimension:
+            logger.warning(f"System under heavy load (CPU: {cpu_percent}%, Mem: {memory_percent}%, Load: {load_avg:.1f})")
+            logger.warning(f"Reducing max dimension from {max_dimension} to {adjusted_max_dim}")
+            max_dimension = adjusted_max_dim
     
     start_memory = psutil.virtual_memory().percent
     logger.info(f"Starting upscale: scale={scale}x, face_enhance={face_enhance}, memory={start_memory}%")
     
     try:
+        # Track upscale operations for cache management
+        _increment_upscale_counter()
+        
         # Load image using cv2 for RealESRGANer compatibility
         img = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
         if img is None:
@@ -228,7 +276,36 @@ def run_upscale(
         logger.info(f"Starting Real-ESRGAN inference on {get_optimal_device()}")
         
         # Use RealESRGANer's enhance method which returns a NumPy array
-        output, _ = model.enhance(img, outscale=scale)
+        # Add memory optimization - do cleanup before the heavy operation if memory is tight
+        current_memory = psutil.virtual_memory().percent
+        if current_memory > 80:
+            logger.warning(f"High memory usage before inference: {current_memory}%")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Perform upscaling with proper error handling
+        try:
+            output, _ = model.enhance(img, outscale=scale)
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower() and torch.cuda.is_available():
+                # Handle CUDA OOM errors by falling back to CPU
+                logger.warning("CUDA out of memory, falling back to CPU")
+                # Force CPU mode and retry
+                backup_model = RealESRGANer(
+                    scale=model.scale,
+                    model_path=model.model_path,
+                    dni_weight=None,
+                    model=None,
+                    tile=128,  # Smaller tiles for CPU mode
+                    tile_pad=10,
+                    pre_pad=0,
+                    device="cpu"
+                )
+                output, _ = backup_model.enhance(img, outscale=scale)
+                del backup_model  # Clean up immediately
+            else:
+                raise  # Re-raise other errors
         
         after_upscale_memory = psutil.virtual_memory().percent
         logger.info(f"Upscaling completed. Memory: {before_upscale_memory}% -> {after_upscale_memory}%")
@@ -280,6 +357,8 @@ def run_upscale(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
+        _increment_upscale_counter()  # Track this upscale operation
+    
     except Exception as e:
         logger.error(f"Upscaling failed: {e}")
         
@@ -291,21 +370,87 @@ def run_upscale(
         raise
 
 def clear_model_cache():
-    """Clear all cached models to free memory"""
+    """Clear all cached models to free memory with additional cleanup"""
     global _models
     
     logger.info("Clearing model cache")
     
     for model_key in list(_models.keys()):
-        del _models[model_key]
+        try:
+            # More thorough cleanup of model resources
+            if hasattr(_models[model_key], 'model') and _models[model_key].model is not None:
+                del _models[model_key].model
+            del _models[model_key]
+        except Exception as e:
+            logger.warning(f"Error while deleting model {model_key}: {e}")
     
     _models.clear()
-    gc.collect()
+    
+    # Aggressive garbage collection
+    for _ in range(3):  # Multiple GC passes
+        gc.collect()
     
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+        
+        # Log GPU memory status
+        try:
+            allocated = torch.cuda.memory_allocated() / (1024**2)
+            reserved = torch.cuda.memory_reserved() / (1024**2)
+            logger.info(f"GPU memory after cleanup: {allocated:.1f}MB allocated, {reserved:.1f}MB reserved")
+        except Exception as e:
+            logger.warning(f"Failed to log GPU memory stats: {e}")
+    
+    # Log system memory
+    mem = psutil.virtual_memory()
+    logger.info(f"System memory after cleanup: {mem.percent}% used, {mem.available/(1024**3):.1f}GB available")
     
     logger.info("Model cache cleared")
+
+def schedule_periodic_cache_clearing():
+    """Setup periodic cache clearing to prevent memory buildup"""
+    def clear_cache_periodically():
+        global _models, _upscale_counter, _last_cache_clear_time
+        
+        while True:
+            try:
+                time_module.sleep(300)  # Check every 5 minutes
+                
+                current_time = time_module.time()
+                time_since_last_clear = current_time - _last_cache_clear_time
+                
+                # Clear cache if:
+                # 1. More than 50 upscales since last clear OR
+                # 2. More than 30 minutes since last clear AND memory usage is high
+                memory_usage = psutil.virtual_memory().percent
+                
+                if (_upscale_counter >= 50 or 
+                    (time_since_last_clear > 1800 and memory_usage > 70)):
+                    logger.info(f"Scheduled cache clearing: {_upscale_counter} upscales, "
+                                f"{time_since_last_clear:.0f}s since last clear, "
+                                f"memory at {memory_usage}%")
+                    clear_model_cache()
+                    _upscale_counter = 0
+                    _last_cache_clear_time = current_time
+                
+            except Exception as e:
+                logger.error(f"Error in cache clearing thread: {e}")
+    
+    # Start background thread for cache clearing
+    cache_thread = threading.Thread(target=clear_cache_periodically, daemon=True)
+    cache_thread.start()
+    logger.info("Periodic cache clearing scheduler started")
+
+# Initialize the periodic cache clearing
+try:
+    schedule_periodic_cache_clearing()
+except Exception as e:
+    logger.error(f"Failed to start cache clearing scheduler: {e}")
+
+def _increment_upscale_counter():
+    """Increment the upscale counter for cache management"""
+    global _upscale_counter
+    _upscale_counter += 1
 
 def get_model_info():
     """Get information about loaded models"""

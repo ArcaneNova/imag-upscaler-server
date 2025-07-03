@@ -188,6 +188,7 @@ async def submit_upscale(
     file: UploadFile = File(...),
     scale: int = 2,
     face_enhance: bool = False,
+    direct_process: bool = False,  # Added direct processing option
     redis_client: Redis = Depends(get_redis_client)
 ):
     """Submit image for upscaling with enhanced validation and processing"""
@@ -240,6 +241,75 @@ async def submit_upscale(
             "temp_path": temp_path
         }
         
+        # Automatic direct processing for small images or if Redis is unavailable
+        small_image = file.size < 2 * 1024 * 1024  # 2MB threshold
+        if direct_process or small_image or redis_client is None:
+            logger.info(f"Direct processing job {job_id}: {file.filename} (scale={scale})")
+            
+            # For direct processing, use thread pool to avoid blocking
+            output_filename = f"{job_id}_upscaled_{scale}x{'_face' if face_enhance else ''}.png"
+            output_path = f"output/{output_filename}"
+            
+            # Import here to avoid circular imports
+            from app.upscale import run_upscale
+            import cloudinary.uploader
+            
+            # Submit upscaling to thread pool
+            def process_image():
+                try:
+                    # Run upscaling
+                    os.makedirs("output", exist_ok=True)
+                    run_upscale(temp_path, output_path, scale=scale, face_enhance=face_enhance, max_dimension=1024)
+                    
+                    # Upload to Cloudinary
+                    result = cloudinary.uploader.upload(
+                        output_path,
+                        public_id=f"upscaled_{job_id}_{int(timestamp)}",
+                        folder="ai-upscaler/results",
+                        resource_type="image",
+                        quality="auto:good",
+                        fetch_format="auto"
+                    )
+                    
+                    # Clean up files
+                    for path in [temp_path, output_path]:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    
+                    # Update Redis if available
+                    if redis_client:
+                        redis_client.hset(f"job:{job_id}", mapping={
+                            "status": "completed",
+                            "result_url": result["secure_url"],
+                            "completed_at": time.time()
+                        })
+                        redis_client.expire(f"job:{job_id}", 86400)
+                    
+                    logger.info(f"Direct processing completed for {job_id}: {result['secure_url']}")
+                except Exception as e:
+                    logger.error(f"Direct processing failed for {job_id}: {e}")
+                    if redis_client:
+                        redis_client.hset(f"job:{job_id}", mapping={
+                            "status": "failed",
+                            "error": str(e)
+                        })
+            
+            # Run in background
+            background_tasks.add_task(process_image)
+            
+            return {
+                "job_id": job_id,
+                "status": "processing",
+                "message": "Image submitted for direct processing",
+                "estimated_time": "15-60 seconds",
+                "parameters": {
+                    "scale": scale,
+                    "face_enhance": face_enhance,
+                    "direct_processing": True
+                }
+            }
+        
+        # Otherwise use the queue system with Celery
         # Store job info in Redis if available
         if redis_client:
             # Set job data with 24-hour expiration
@@ -247,18 +317,11 @@ async def submit_upscale(
             redis_client.expire(f"job:{job_id}", 86400)  # 24 hours
             
             # Add to processing queue with priority
-            queue_data = {
-                "job_id": job_id,
-                "priority": 1 if face_enhance else 0,  # Higher priority for face enhancement
-                "timestamp": timestamp
-            }
             redis_client.lpush("processing_queue", f"{job_id}|{scale}|{face_enhance}")
             
             # Update queue stats
             redis_client.incr("stats:total_jobs")
             redis_client.incr("stats:queued_jobs")
-        else:
-            logger.warning(f"Redis unavailable: job {job_id} not tracked in Redis")
         
         # Submit to Celery worker asynchronously
         background_tasks.add_task(
