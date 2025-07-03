@@ -39,80 +39,131 @@ async def lifespan(app: FastAPI):
     
     # Initialize Redis with connection pooling and improved fallback mechanism
     try:
-        # Get Redis host with multiple fallback options
-        redis_host = os.getenv("REDIS_HOST", "redis")
-        redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        
         # Check if Redis is disabled by environment variable
         if os.getenv("REDIS_DISABLE", "").lower() in ("true", "1", "yes"):
             logger.warning("Redis disabled by environment variable - operating in local mode")
             redis_client = None
         else:
-            # Determine the best Redis host to use with multiple fallbacks
-            candidate_hosts = []
+            # CONNECTION METHOD 1: Full REDIS_URL (highest priority)
+            # This is common in managed environments like Railway, Heroku, etc.
+            redis_url = os.getenv("REDIS_URL")
             
-            # First add the configured host
-            candidate_hosts.append(redis_host)
+            # CONNECTION METHOD 2: Check for Railway-specific Redis environment variables
+            if not redis_url and os.getenv("RAILWAY_ENVIRONMENT"):
+                # Railway provides Redis connection details in these environment variables
+                railway_redis_url = os.getenv("REDISURL") or os.getenv("REDIS_URL")
+                if railway_redis_url:
+                    redis_url = railway_redis_url
+                    logger.info(f"Using Railway Redis URL from environment")
             
-            # Add localhost as a fallback if not already in the list and not in Docker
-            if "localhost" not in candidate_hosts and not os.getenv("DOCKER_CONTAINER"):
-                candidate_hosts.append("localhost")
-            
-            # Add common alternative hostnames as fallbacks
-            if "127.0.0.1" not in candidate_hosts:
-                candidate_hosts.append("127.0.0.1")
-                
-            # Check for Railway-specific environment and add Railway Redis service name
-            if os.getenv("RAILWAY_ENVIRONMENT"):
-                railway_redis = os.getenv("RAILWAY_REDIS_SERVICE_HOST", "railway-redis")
-                if railway_redis not in candidate_hosts:
-                    candidate_hosts.append(railway_redis)
-            
-            # Try each host in order until one works
-            connected = False
-            connection_errors = []
-            
-            for host in candidate_hosts:
+            # CONNECTION METHOD 3: Traditional host/port configuration
+            if redis_url:
+                # Connect using URL
+                logger.info(f"Attempting Redis connection using URL configuration")
                 try:
-                    logger.info(f"Attempting Redis connection to {host}:{redis_port}")
-                    test_client = Redis(
-                        host=host,
-                        port=redis_port,
-                        socket_timeout=2,
-                        socket_connect_timeout=2,
-                        decode_responses=True
+                    redis_client = Redis.from_url(
+                        redis_url,
+                        decode_responses=True,
+                        socket_timeout=5,
+                        socket_connect_timeout=5,
+                        retry_on_timeout=True,
+                        health_check_interval=30,
+                        max_connections=50,
+                        retry=3
                     )
-                    test_client.ping()
-                    redis_host = host  # Use this working host
-                    test_client.close()
-                    connected = True
-                    logger.info(f"Successfully connected to Redis at {host}:{redis_port}")
-                    break
+                    redis_client.ping()
+                    logger.info("Successfully connected to Redis using URL configuration")
                 except Exception as e:
-                    error_msg = f"Redis connection to {host}:{redis_port} failed: {str(e)}"
-                    connection_errors.append(error_msg)
-                    logger.warning(error_msg)
-            
-            if not connected:
-                logger.error(f"All Redis connection attempts failed: {connection_errors}")
-                logger.warning("Operating without Redis - some features like job status tracking will be limited")
-                redis_client = None
+                    logger.error(f"Redis URL connection failed: {str(e)}")
+                    redis_client = None
             else:
-                # Use the working host for the main Redis client
-                redis_client = Redis(
-                    host=redis_host,
-                    port=redis_port,
-                    decode_responses=True,
-                    socket_timeout=5,
-                    socket_connect_timeout=5,
-                    retry_on_timeout=True,
-                    health_check_interval=30,
-                    max_connections=50,  # Connection pooling
-                    retry=3  # Add retry parameter
-                )
-                # Verify connection one more time
-                redis_client.ping()
-                logger.info(f"Connected to Redis at {redis_host}:{redis_port} with connection pooling")
+                # Use traditional host/port configuration with multiple fallbacks
+                redis_host = os.getenv("REDIS_HOST", "redis")
+                redis_port = int(os.getenv("REDIS_PORT", "6379"))
+                redis_password = os.getenv("REDIS_PASSWORD", None)
+                
+                # Determine the best Redis host to use with multiple fallbacks
+                candidate_hosts = []
+                
+                # First add the configured host
+                candidate_hosts.append(redis_host)
+                
+                # Add common alternative hostnames as fallbacks
+                candidate_hosts.extend([
+                    "localhost", 
+                    "127.0.0.1",
+                    "redis-master",      # Common Kubernetes service name
+                    "redis.svc.cluster.local"  # Kubernetes fully qualified service name
+                ])
+                
+                # Check for Railway-specific environment and add Railway Redis service name
+                if os.getenv("RAILWAY_ENVIRONMENT"):
+                    railway_redis_host = os.getenv("REDISHOST")
+                    if railway_redis_host:
+                        candidate_hosts.insert(0, railway_redis_host)  # Give priority to this host
+                
+                # Deduplicate hosts list
+                candidate_hosts = list(dict.fromkeys(candidate_hosts))
+                
+                # Try each host in order until one works
+                connected = False
+                connection_errors = []
+                
+                for host in candidate_hosts:
+                    try:
+                        logger.info(f"Attempting Redis connection to {host}:{redis_port}")
+                        
+                        # Create connection arguments
+                        redis_args = {
+                            "host": host,
+                            "port": redis_port,
+                            "socket_timeout": 2,
+                            "socket_connect_timeout": 2,
+                            "decode_responses": True
+                        }
+                        
+                        # Add password if provided
+                        if redis_password:
+                            redis_args["password"] = redis_password
+                            
+                        test_client = Redis(**redis_args)
+                        test_client.ping()
+                        redis_host = host  # Use this working host
+                        test_client.close()
+                        connected = True
+                        logger.info(f"Successfully connected to Redis at {host}:{redis_port}")
+                        break
+                    except Exception as e:
+                        error_msg = f"Redis connection to {host}:{redis_port} failed: {str(e)}"
+                        connection_errors.append(error_msg)
+                        logger.warning(error_msg)
+                
+                if not connected:
+                    logger.error(f"All Redis connection attempts failed: {connection_errors}")
+                    logger.warning("Operating without Redis - some features like job status tracking will be limited")
+                    redis_client = None
+                else:
+                    # Use the working host for the main Redis client
+                    redis_args = {
+                        "host": redis_host,
+                        "port": redis_port,
+                        "decode_responses": True,
+                        "socket_timeout": 5,
+                        "socket_connect_timeout": 5,
+                        "retry_on_timeout": True,
+                        "health_check_interval": 30,
+                        "max_connections": 50,  # Connection pooling
+                        "retry": 3  # Add retry parameter
+                    }
+                    
+                    # Add password if provided
+                    if redis_password:
+                        redis_args["password"] = redis_password
+                        
+                    redis_client = Redis(**redis_args)
+                    # Verify connection one more time
+                    redis_client.ping()
+                    logger.info(f"Connected to Redis at {redis_host}:{redis_port} with connection pooling")
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
         logger.warning("Operating without Redis - some features like job status tracking will be limited")
@@ -192,23 +243,49 @@ async def get_redis_client():
                 except:
                     pass
                 
-                # Get configured Redis parameters
-                redis_host = os.getenv("REDIS_HOST", "redis")
-                redis_port = int(os.getenv("REDIS_PORT", "6379"))
+                # Try reconnection using REDIS_URL first if available
+                redis_url = os.getenv("REDIS_URL") or os.getenv("REDISURL")
                 
-                # Try to reconnect
-                redis_client = Redis(
-                    host=redis_host,
-                    port=redis_port,
-                    decode_responses=True,
-                    socket_timeout=3,
-                    socket_connect_timeout=3,
-                    retry_on_timeout=True,
-                    health_check_interval=15,
-                    max_connections=50
-                )
-                redis_client.ping()
-                logger.info(f"Successfully reconnected to Redis at {redis_host}:{redis_port}")
+                if redis_url:
+                    logger.info(f"Attempting to reconnect using Redis URL")
+                    redis_client = Redis.from_url(
+                        redis_url,
+                        decode_responses=True,
+                        socket_timeout=3,
+                        socket_connect_timeout=3,
+                        retry_on_timeout=True,
+                        health_check_interval=15,
+                        max_connections=50,
+                        retry=3
+                    )
+                    redis_client.ping()
+                    logger.info("Successfully reconnected using Redis URL")
+                else:
+                    # Get configured Redis parameters
+                    redis_host = os.getenv("REDIS_HOST", "redis")
+                    redis_port = int(os.getenv("REDIS_PORT", "6379"))
+                    redis_password = os.getenv("REDIS_PASSWORD")
+                    
+                    # Try to reconnect with traditional params
+                    redis_args = {
+                        "host": redis_host,
+                        "port": redis_port,
+                        "decode_responses": True,
+                        "socket_timeout": 3,
+                        "socket_connect_timeout": 3,
+                        "retry_on_timeout": True,
+                        "health_check_interval": 15,
+                        "max_connections": 50,
+                        "retry": 3
+                    }
+                    
+                    # Add password if provided
+                    if redis_password:
+                        redis_args["password"] = redis_password
+                        
+                    redis_client = Redis(**redis_args)
+                    redis_client.ping()
+                    logger.info(f"Successfully reconnected to Redis at {redis_host}:{redis_port}")
             except Exception as reconnect_err:
                 logger.error(f"Redis reconnection failed: {reconnect_err}")
                 redis_client = None

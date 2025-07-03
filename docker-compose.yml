@@ -40,6 +40,7 @@ services:
       - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - REDIS_DISABLE=${REDIS_DISABLE:-false}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       - WORKERS=1
@@ -83,6 +84,7 @@ services:
       - CLOUDINARY_API_SECRET=${CLOUDINARY_API_SECRET}
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - REDIS_DISABLE=${REDIS_DISABLE:-false}
       - C_FORCE_ROOT=1
     depends_on:
