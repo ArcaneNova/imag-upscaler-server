@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -183,12 +183,12 @@ async def health_check():
 @app.post("/upscale")
 @limiter.limit("20/minute")  # Increased rate limit
 async def submit_upscale(
-    request,
+    request: Request,  # Properly type-annotate as Request for rate limiter
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     scale: int = 2,
     face_enhance: bool = False,
-    direct_process: bool = False,  # Added direct processing option
+    direct_process: bool = False,  # Add support for direct processing option
     redis_client: Redis = Depends(get_redis_client)
 ):
     """Submit image for upscaling with enhanced validation and processing"""
@@ -241,75 +241,6 @@ async def submit_upscale(
             "temp_path": temp_path
         }
         
-        # Automatic direct processing for small images or if Redis is unavailable
-        small_image = file.size < 2 * 1024 * 1024  # 2MB threshold
-        if direct_process or small_image or redis_client is None:
-            logger.info(f"Direct processing job {job_id}: {file.filename} (scale={scale})")
-            
-            # For direct processing, use thread pool to avoid blocking
-            output_filename = f"{job_id}_upscaled_{scale}x{'_face' if face_enhance else ''}.png"
-            output_path = f"output/{output_filename}"
-            
-            # Import here to avoid circular imports
-            from app.upscale import run_upscale
-            import cloudinary.uploader
-            
-            # Submit upscaling to thread pool
-            def process_image():
-                try:
-                    # Run upscaling
-                    os.makedirs("output", exist_ok=True)
-                    run_upscale(temp_path, output_path, scale=scale, face_enhance=face_enhance, max_dimension=1024)
-                    
-                    # Upload to Cloudinary
-                    result = cloudinary.uploader.upload(
-                        output_path,
-                        public_id=f"upscaled_{job_id}_{int(timestamp)}",
-                        folder="ai-upscaler/results",
-                        resource_type="image",
-                        quality="auto:good",
-                        fetch_format="auto"
-                    )
-                    
-                    # Clean up files
-                    for path in [temp_path, output_path]:
-                        if os.path.exists(path):
-                            os.remove(path)
-                    
-                    # Update Redis if available
-                    if redis_client:
-                        redis_client.hset(f"job:{job_id}", mapping={
-                            "status": "completed",
-                            "result_url": result["secure_url"],
-                            "completed_at": time.time()
-                        })
-                        redis_client.expire(f"job:{job_id}", 86400)
-                    
-                    logger.info(f"Direct processing completed for {job_id}: {result['secure_url']}")
-                except Exception as e:
-                    logger.error(f"Direct processing failed for {job_id}: {e}")
-                    if redis_client:
-                        redis_client.hset(f"job:{job_id}", mapping={
-                            "status": "failed",
-                            "error": str(e)
-                        })
-            
-            # Run in background
-            background_tasks.add_task(process_image)
-            
-            return {
-                "job_id": job_id,
-                "status": "processing",
-                "message": "Image submitted for direct processing",
-                "estimated_time": "15-60 seconds",
-                "parameters": {
-                    "scale": scale,
-                    "face_enhance": face_enhance,
-                    "direct_processing": True
-                }
-            }
-        
-        # Otherwise use the queue system with Celery
         # Store job info in Redis if available
         if redis_client:
             # Set job data with 24-hour expiration
@@ -317,29 +248,129 @@ async def submit_upscale(
             redis_client.expire(f"job:{job_id}", 86400)  # 24 hours
             
             # Add to processing queue with priority
+            queue_data = {
+                "job_id": job_id,
+                "priority": 1 if face_enhance else 0,  # Higher priority for face enhancement
+                "timestamp": timestamp
+            }
             redis_client.lpush("processing_queue", f"{job_id}|{scale}|{face_enhance}")
             
             # Update queue stats
             redis_client.incr("stats:total_jobs")
             redis_client.incr("stats:queued_jobs")
+        else:
+            logger.warning(f"Redis unavailable: job {job_id} not tracked in Redis")
         
-        # Submit to Celery worker asynchronously
-        background_tasks.add_task(
-            lambda: upscale_image.delay(job_id, temp_path, scale, face_enhance)
-        )
-        
-        logger.info(f"Job {job_id} queued: {file.filename} ({file.size} bytes, scale={scale})")
-        
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "message": "Image submitted for upscaling",
-            "estimated_time": "30-120 seconds",
-            "parameters": {
-                "scale": scale,
-                "face_enhance": face_enhance
+        # Process based on direct_process parameter
+        if direct_process:
+            # For direct processing, handle the upscaling right away in this request
+            try:
+                logger.info(f"Direct processing requested for job {job_id}")
+                
+                # Import and use upscaler directly
+                from app.upscale import run_upscale
+                
+                # Define output path
+                output_path = f"output/{job_id}_{int(timestamp)}.png"
+                
+                # Run upscaling directly
+                run_upscale(temp_path, output_path, scale, face_enhance)
+                
+                # Check if the output file exists
+                if not os.path.exists(output_path):
+                    raise ValueError("Upscaling failed to produce output file")
+                
+                # Handle file upload to Cloudinary
+                cloudinary_url = None
+                try:
+                    import cloudinary
+                    import cloudinary.uploader
+                    
+                    if all([
+                        os.getenv("CLOUDINARY_CLOUD_NAME"),
+                        os.getenv("CLOUDINARY_API_KEY"),
+                        os.getenv("CLOUDINARY_API_SECRET")
+                    ]):
+                        # Configure Cloudinary
+                        cloudinary.config(
+                            cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+                            api_key=os.getenv("CLOUDINARY_API_KEY"),
+                            api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+                            secure=True
+                        )
+                        
+                        # Upload to Cloudinary
+                        upload_result = cloudinary.uploader.upload(
+                            output_path,
+                            folder="realesrgan_upscales",
+                            resource_type="image"
+                        )
+                        
+                        cloudinary_url = upload_result.get("secure_url")
+                        logger.info(f"Image uploaded to Cloudinary: {cloudinary_url}")
+                except Exception as cloud_err:
+                    logger.error(f"Cloudinary upload failed: {cloud_err}")
+                
+                # Update job data
+                completion_time = time.time()
+                processing_time = completion_time - timestamp
+                
+                # Store result in Redis if available
+                if redis_client:
+                    result_data = {
+                        "status": "completed",
+                        "completed_at": completion_time,
+                        "processing_time": processing_time,
+                        "result_url": cloudinary_url,
+                        "output_path": output_path
+                    }
+                    redis_client.hset(f"job:{job_id}", mapping=result_data)
+                
+                # Clean up temp file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                
+                # Return the result directly
+                return {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "processing_time": f"{processing_time:.2f} seconds",
+                    "result_url": cloudinary_url,
+                    "message": "Image upscaled successfully",
+                    "parameters": {
+                        "scale": scale,
+                        "face_enhance": face_enhance
+                    }
+                }
+                
+            except Exception as direct_err:
+                logger.error(f"Direct processing failed: {direct_err}")
+                # Clean up temp files
+                for path in [temp_path, f"output/{job_id}_{int(timestamp)}.png"]:
+                    if os.path.exists(path):
+                        os.remove(path)
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Direct processing failed: {str(direct_err)}"
+                )
+        else:
+            # Submit to Celery worker asynchronously for background processing
+            background_tasks.add_task(
+                lambda: upscale_image.delay(job_id, temp_path, scale, face_enhance)
+            )
+            
+            logger.info(f"Job {job_id} queued: {file.filename} ({file.size} bytes, scale={scale})")
+            
+            return {
+                "job_id": job_id,
+                "status": "queued",
+                "message": "Image submitted for upscaling",
+                "estimated_time": "30-120 seconds",
+                "parameters": {
+                    "scale": scale,
+                    "face_enhance": face_enhance
+                }
             }
-        }
         
     except Exception as e:
         logger.error(f"Error submitting job: {e}")
@@ -351,7 +382,7 @@ async def submit_upscale(
 @app.get("/status/{job_id}")
 @limiter.limit("60/minute")  # Higher limit for status checks
 async def get_status(
-    request, 
+    request: Request, 
     job_id: str,
     redis_client: Redis = Depends(get_redis_client)
 ):
@@ -403,7 +434,7 @@ async def get_status(
 @app.get("/queue")
 @limiter.limit("30/minute")
 async def get_queue_stats(
-    request,
+    request: Request,
     redis_client: Redis = Depends(get_redis_client)
 ):
     """Get queue statistics"""
@@ -453,7 +484,7 @@ async def get_queue_stats(
 @app.delete("/job/{job_id}")
 @limiter.limit("10/minute")
 async def cancel_job(
-    request,
+    request: Request,
     job_id: str,
     redis_client: Redis = Depends(get_redis_client)
 ):
@@ -494,7 +525,7 @@ async def cancel_job(
 
 @app.get("/metrics")
 async def get_metrics(
-    request,
+    request: Request,
     redis_client: Redis = Depends(get_redis_client)
 ):
     """Get detailed API metrics"""
