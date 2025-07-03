@@ -45,6 +45,9 @@ RUN mkdir -p temp output weights logs \
 COPY . .
 RUN chown -R appuser:appuser /app
 
+# Ensure app directory is recognized as a Python package
+RUN test -f app/__init__.py || echo "# Python package" > app/__init__.py
+
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
@@ -52,6 +55,10 @@ ENV PATH=/home/appuser/.local/bin:$PATH
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
 ENV DOCKER_CONTAINER=1
+
+# Debug the Python path
+RUN python -c "import sys; print('Python path:', sys.path)"
+RUN python -c "import os; print('App files:', os.listdir('/app/app'))"
 
 # Switch to non-root user
 USER appuser
@@ -63,5 +70,9 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # Expose port
 EXPOSE 8000
 
+# Add startup script and make it executable
+COPY start-api.sh .
+RUN chmod +x start-api.sh
+
 # Default command for API server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop"]
+CMD ["./start-api.sh"]

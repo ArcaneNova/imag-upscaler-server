@@ -33,6 +33,7 @@ services:
       - ./output:/app/output
       - ./weights:/app/weights
       - ./logs:/app/logs
+      - ./app:/app/app  # Ensure app directory is properly mounted
     environment:
       - CLOUDINARY_CLOUD_NAME=${CLOUDINARY_CLOUD_NAME}
       - CLOUDINARY_API_KEY=${CLOUDINARY_API_KEY}
