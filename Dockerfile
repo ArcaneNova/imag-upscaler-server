@@ -41,8 +41,12 @@ COPY --from=builder /root/.local /home/appuser/.local
 RUN mkdir -p temp output weights logs \
     && chown -R appuser:appuser /app
 
-# Copy application code
+# Copy application code and startup script
 COPY . .
+COPY start-api.sh .
+RUN chmod +x start-api.sh
+
+# Set ownership
 RUN chown -R appuser:appuser /app
 
 # Ensure app directory is recognized as a Python package
@@ -70,9 +74,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Add startup script and make it executable
-COPY start-api.sh .
-RUN chmod +x start-api.sh
+# Startup script already copied and made executable above
 
 # Default command for API server
 CMD ["./start-api.sh"]
