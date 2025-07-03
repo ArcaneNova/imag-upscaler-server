@@ -1,3 +1,12 @@
+# PowerShell script to deploy the Real-ESRGAN fix
+Write-Host "Deploying Real-ESRGAN import fix..." -ForegroundColor Cyan
+
+# Create required directories
+New-Item -ItemType Directory -Force -Path "app" | Out-Null
+New-Item -ItemType Directory -Force -Path "weights" | Out-Null
+
+# Create the fixed upscale.py file
+$upscalePy = @'
 from PIL import Image, ImageFilter, ImageEnhance
 import torch
 import cv2
@@ -324,3 +333,94 @@ def get_model_info():
         info["gpu_name"] = torch.cuda.get_device_name(0)
     
     return info
+'@
+
+$upscalePyPath = Join-Path -Path "app" -ChildPath "upscale.py"
+Set-Content -Path $upscalePyPath -Value $upscalePy
+Write-Host "✓ Created fixed upscale.py file" -ForegroundColor Green
+
+# Update requirements.txt
+$requirements = @'
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+uvloop==0.19.0
+
+# Image Processing
+pillow==10.1.0
+opencv-python-headless==4.8.1.78
+numpy==1.24.4
+
+# AI/ML
+torch==2.1.1
+torchvision==0.16.1
+realesrgan==0.3.0
+basicsr>=1.4.2
+facexlib>=0.2.5
+gfpgan>=1.3.8
+opencv-python>=4.6.0
+
+# Task Queue
+celery==5.3.4
+redis==5.0.1
+
+# Cloud Storage
+cloudinary==1.36.0
+
+# Utilities
+python-dotenv==1.0.0
+python-multipart==0.0.6
+aiofiles==23.2.1
+psutil==5.9.6
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Monitoring and Logging
+prometheus-client==0.19.0
+
+# Development
+httpx==0.25.2
+'@
+
+Set-Content -Path "requirements.txt" -Value $requirements
+Write-Host "✓ Updated requirements.txt" -ForegroundColor Green
+
+# Create a script to fix worker.py
+$fixWorkerPy = @'
+import sys
+import os
+
+# Path to the worker.py file
+worker_file = os.path.join('app', 'worker.py')
+
+if not os.path.exists(worker_file):
+    print(f"Error: {worker_file} not found")
+    sys.exit(1)
+
+# Read the current content
+with open(worker_file, 'r') as f:
+    content = f.read()
+
+# Check if the file already has the correct import
+if "from app.upscale import run_upscale" in content:
+    # The file is using the correct import, no need to change
+    print("Worker file already has the correct import.")
+    sys.exit(0)
+
+# Replace any import of RealESRGAN with the correct one
+with open(worker_file, 'w') as f:
+    f.write(content.replace(
+        "from app.upscale import RealESRGAN",
+        "from app.upscale import run_upscale"
+    ))
+    print("Updated worker.py with correct imports.")
+'@
+
+$fixWorkerPath = "fix_worker.py"
+Set-Content -Path $fixWorkerPath -Value $fixWorkerPy
+Write-Host "Running worker.py fix script..." -ForegroundColor Yellow
+python $fixWorkerPath
+
+Write-Host "`nReal-ESRGAN fix successfully deployed!" -ForegroundColor Cyan
+Write-Host "Please restart the API server to apply the changes." -ForegroundColor Yellow

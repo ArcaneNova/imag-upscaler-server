@@ -1,3 +1,15 @@
+#!/bin/bash
+# Script to ensure the Real-ESRGAN fix is deployed correctly
+set -e  # Exit on any error
+
+echo "Deploying Real-ESRGAN import fix..."
+
+# Create required directories
+mkdir -p app
+mkdir -p weights
+
+# Create the fixed upscale.py file
+cat > app/upscale.py << 'EOF'
 from PIL import Image, ImageFilter, ImageEnhance
 import torch
 import cv2
@@ -324,3 +336,86 @@ def get_model_info():
         info["gpu_name"] = torch.cuda.get_device_name(0)
     
     return info
+EOF
+
+# Update requirements.txt to include all necessary dependencies
+cat > requirements.txt << 'EOF'
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+uvloop==0.19.0
+
+# Image Processing
+pillow==10.1.0
+opencv-python-headless==4.8.1.78
+numpy==1.24.4
+
+# AI/ML
+torch==2.1.1
+torchvision==0.16.1
+realesrgan==0.3.0
+basicsr>=1.4.2
+facexlib>=0.2.5
+gfpgan>=1.3.8
+opencv-python>=4.6.0
+
+# Task Queue
+celery==5.3.4
+redis==5.0.1
+
+# Cloud Storage
+cloudinary==1.36.0
+
+# Utilities
+python-dotenv==1.0.0
+python-multipart==0.0.6
+aiofiles==23.2.1
+psutil==5.9.6
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Monitoring and Logging
+prometheus-client==0.19.0
+
+# Development
+httpx==0.25.2
+EOF
+
+# Create a patch file for the worker.py to ensure it's using the correct import
+cat > fix_worker.py << 'EOF'
+#!/usr/bin/env python3
+import sys
+import os
+
+# Path to the worker.py file
+worker_file = 'app/worker.py'
+
+if not os.path.exists(worker_file):
+    print(f"Error: {worker_file} not found")
+    sys.exit(1)
+
+# Read the current content
+with open(worker_file, 'r') as f:
+    content = f.read()
+
+# Check if the file already has the correct import
+if "from app.upscale import run_upscale" in content:
+    # The file is using the correct import, no need to change
+    print("Worker file already has the correct import.")
+    sys.exit(0)
+
+# Replace any import of RealESRGAN with the correct one
+with open(worker_file, 'w') as f:
+    f.write(content.replace(
+        "from app.upscale import RealESRGAN",
+        "from app.upscale import run_upscale"
+    ))
+    print("Updated worker.py with correct imports.")
+EOF
+
+chmod +x fix_worker.py
+python3 fix_worker.py
+
+echo "Real-ESRGAN fix successfully deployed!"
+echo "Please restart the API server to apply the changes."

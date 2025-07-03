@@ -1,4 +1,32 @@
-from PIL import Image, ImageFilter, ImageEnhance
+#!/usr/bin/env python3
+"""
+Real-ESRGAN Import Direct Patch
+
+This is a direct replacement patch for the upscale.py file
+that fixes the RealESRGAN import issue. This script can be run
+in the production environment to patch the file in-place.
+
+Usage:
+  python3 patch_upscale.py
+
+The script will create a backup of the original file and then
+apply the patch.
+"""
+
+import os
+import sys
+import shutil
+import logging
+
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("realesrgan-patch")
+
+# Path to the upscale.py file
+UPSCALE_FILE = "app/upscale.py"
+
+# The fixed content for upscale.py
+FIXED_CONTENT = """from PIL import Image, ImageFilter, ImageEnhance
 import torch
 import cv2
 import numpy as np
@@ -324,3 +352,73 @@ def get_model_info():
         info["gpu_name"] = torch.cuda.get_device_name(0)
     
     return info
+"""
+
+def patch_requirements():
+    """Update requirements.txt file"""
+    req_file = "requirements.txt"
+    if not os.path.exists(req_file):
+        logger.warning(f"{req_file} not found, skipping requirements update")
+        return False
+    
+    with open(req_file, "r") as f:
+        content = f.read()
+    
+    # Check if the required dependencies are already present
+    required_deps = ["basicsr>=1.4.2", "facexlib>=0.2.5", "gfpgan>=1.3.8"]
+    missing_deps = [dep for dep in required_deps if dep not in content]
+    
+    if not missing_deps:
+        logger.info("Requirements are already up to date")
+        return True
+    
+    # Update the requirements
+    with open(req_file, "a") as f:
+        f.write("\n# Added by Real-ESRGAN patch\n")
+        for dep in missing_deps:
+            f.write(f"{dep}\n")
+    
+    logger.info(f"Updated {req_file} with missing dependencies")
+    return True
+
+def patch_upscale():
+    """Patch the upscale.py file"""
+    if not os.path.exists(UPSCALE_FILE):
+        logger.error(f"{UPSCALE_FILE} not found")
+        return False
+    
+    # Create a backup of the original file
+    backup_file = f"{UPSCALE_FILE}.bak.{int(time.time())}"
+    shutil.copy2(UPSCALE_FILE, backup_file)
+    logger.info(f"Created backup: {backup_file}")
+    
+    # Write the fixed content
+    with open(UPSCALE_FILE, "w") as f:
+        f.write(FIXED_CONTENT)
+    
+    logger.info(f"Patched {UPSCALE_FILE} with fixed implementation")
+    return True
+
+def main():
+    import time
+    logger.info("Starting Real-ESRGAN direct patch")
+    
+    try:
+        # Update requirements
+        patch_requirements()
+        
+        # Patch upscale.py
+        if patch_upscale():
+            logger.info("Patch applied successfully!")
+            logger.info("Please restart the API server to apply the changes.")
+        else:
+            logger.error("Failed to apply patch")
+    
+    except Exception as e:
+        logger.error(f"Error applying patch: {e}")
+        return 1
+    
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
