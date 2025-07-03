@@ -1,8 +1,20 @@
 # Celery Configuration for High Performance Real-ESRGAN Processing
 
-# Broker settings
-broker_url = "redis://redis:6379/0"
-result_backend = "redis://redis:6379/0"
+# Broker settings - Use environment variables with fallbacks
+import os
+
+# Get Redis configuration from environment with fallbacks
+redis_host = os.getenv("REDIS_HOST", "redis")
+redis_port = os.getenv("REDIS_PORT", "6379")
+redis_disable = os.getenv("REDIS_DISABLE", "").lower() in ("true", "1", "yes")
+
+# If Redis is explicitly disabled, use memory backend, otherwise use Redis
+if redis_disable:
+    broker_url = "memory://"
+    result_backend = "cache"  # Use local memory cache
+else:
+    broker_url = f"redis://{redis_host}:{redis_port}/0"
+    result_backend = f"redis://{redis_host}:{redis_port}/0"
 
 # Serialization
 task_serializer = "json"

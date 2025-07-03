@@ -35,22 +35,56 @@ cloudinary.config(
 
 @contextmanager
 def redis_connection():
-    """Context manager for Redis connections"""
+    """Context manager for Redis connections with fallback to None"""
     from redis import Redis
     redis_client = None
+    
+    # Check if Redis is disabled by environment variable
+    if os.getenv("REDIS_DISABLE", "").lower() in ("true", "1", "yes"):
+        logger.warning("Redis disabled by environment variable - operating in local mode")
+        yield None
+        return
+        
     try:
+        # Get Redis host with multiple fallback options
+        redis_host = os.getenv("REDIS_HOST", "redis")
+        redis_port = int(os.getenv("REDIS_PORT", "6379"))
+        
+        # Check if we're running in a local development environment
+        if redis_host == "redis" and not os.getenv("DOCKER_CONTAINER"):
+            # Try localhost as fallback for local development
+            try:
+                test_client = Redis(
+                    host="localhost",
+                    port=redis_port,
+                    socket_timeout=2,
+                    decode_responses=True
+                )
+                test_client.ping()
+                logger.info("Using localhost Redis connection for local development")
+                redis_host = "localhost"
+                test_client.close()
+            except Exception:
+                # Localhost also failed, will continue with original host
+                pass
+        
         redis_client = Redis(
-            host=os.getenv("REDIS_HOST", "redis"),
-            port=int(os.getenv("REDIS_PORT", "6379")),
+            host=redis_host,
+            port=redis_port,
             decode_responses=True,
-            socket_timeout=30,
-            socket_connect_timeout=10,
-            retry_on_timeout=True
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=15
         )
+        # Test the connection with a ping
+        redis_client.ping()
+        logger.info(f"Connected to Redis at {redis_host}:{redis_port}")
         yield redis_client
     except Exception as e:
-        logger.error(f"Redis connection error: {e}")
-        raise
+        logger.warning(f"Redis connection error (falling back to local storage): {e}")
+        logger.warning("Operating without Redis - job status updates will not be available")
+        yield None
     finally:
         if redis_client:
             redis_client.close()
@@ -64,13 +98,14 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
     
     with redis_connection() as redis_client:
         try:
-            # Update status to processing with timestamp
-            redis_client.hset(f"job:{job_id}", mapping={
-                "status": "processing",
-                "processing_started": start_time,
-                "worker_pid": os.getpid()
-            })
-            redis_client.decr("stats:queued_jobs")
+            # Update status to processing with timestamp if Redis is available
+            if redis_client:
+                redis_client.hset(f"job:{job_id}", mapping={
+                    "status": "processing",
+                    "processing_started": start_time,
+                    "worker_pid": os.getpid()
+                })
+                redis_client.decr("stats:queued_jobs")
             
             logger.info(f"Starting upscale for job {job_id} (scale={scale}, face_enhance={face_enhance})")
             
@@ -135,7 +170,7 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 except Exception as e:
                     logger.warning(f"Failed to cleanup {file_path}: {e}")
             
-            # Update Redis with comprehensive result
+            # Prepare result data
             result_data = {
                 "status": "completed",
                 "result_url": upload_result["secure_url"],
@@ -151,12 +186,17 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 "compression_ratio": round(output_size / file_size, 2) if file_size > 0 else 0
             }
             
-            redis_client.hset(f"job:{job_id}", mapping=result_data)
-            
-            # Update statistics
-            redis_client.incr("stats:completed_jobs")
-            redis_client.lpush("stats:processing_times", total_time)
-            redis_client.ltrim("stats:processing_times", 0, 99)  # Keep last 100 times
+            # Update Redis if available
+            if redis_client:
+                redis_client.hset(f"job:{job_id}", mapping=result_data)
+                
+                # Update statistics
+                redis_client.incr("stats:completed_jobs")
+                redis_client.lpush("stats:processing_times", total_time)
+                redis_client.ltrim("stats:processing_times", 0, 99)  # Keep last 100 times
+            else:
+                # Log result when Redis isn't available
+                logger.info(f"Job {job_id} completed (Redis unavailable): {result_data['result_url']}")
             
             # Force garbage collection to free memory
             gc.collect()
@@ -177,7 +217,7 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 except Exception as e:
                     logger.warning(f"Failed to cleanup {file_path} on error: {e}")
             
-            # Update Redis with detailed error information
+            # Prepare error data
             error_data = {
                 "status": "failed",
                 "error": str(exc),
@@ -187,8 +227,12 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 "worker_pid": os.getpid()
             }
             
-            redis_client.hset(f"job:{job_id}", mapping=error_data)
-            redis_client.incr("stats:failed_jobs")
+            # Update Redis if available
+            if redis_client:
+                redis_client.hset(f"job:{job_id}", mapping=error_data)
+                redis_client.incr("stats:failed_jobs")
+            else:
+                logger.warning(f"Job {job_id} failed (Redis unavailable): {str(exc)}")
             
             # Force garbage collection
             gc.collect()
@@ -205,6 +249,11 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
 def cleanup_old_jobs():
     """Cleanup old job data from Redis"""
     with redis_connection() as redis_client:
+        # Skip if Redis is not available
+        if not redis_client:
+            logger.warning("Skipping cleanup_old_jobs: Redis not available")
+            return {"status": "skipped", "reason": "redis_unavailable"}
+            
         try:
             # Find jobs older than 7 days
             cutoff_time = time.time() - (7 * 24 * 60 * 60)

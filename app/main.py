@@ -37,22 +37,51 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up Real-ESRGAN API server")
     
-    # Initialize Redis with connection pooling
+    # Initialize Redis with connection pooling and fallback
     try:
-        redis_client = Redis(
-            host=os.getenv("REDIS_HOST", "redis"),
-            port=int(os.getenv("REDIS_PORT", "6379")),
-            decode_responses=True,
-            socket_timeout=10,
-            socket_connect_timeout=10,
-            retry_on_timeout=True,
-            health_check_interval=30,
-            max_connections=50  # Connection pooling
-        )
-        redis_client.ping()
-        logger.info("Connected to Redis with connection pooling")
+        # Get Redis host with multiple fallback options
+        redis_host = os.getenv("REDIS_HOST", "redis")
+        redis_port = int(os.getenv("REDIS_PORT", "6379"))
+        
+        # Check if Redis is disabled by environment variable
+        if os.getenv("REDIS_DISABLE", "").lower() in ("true", "1", "yes"):
+            logger.warning("Redis disabled by environment variable - operating in local mode")
+            redis_client = None
+        else:
+            # Check if we're running in a local development environment
+            if redis_host == "redis" and not os.getenv("DOCKER_CONTAINER"):
+                # Try localhost as fallback for local development
+                try:
+                    test_client = Redis(
+                        host="localhost",
+                        port=redis_port,
+                        socket_timeout=2,
+                        decode_responses=True
+                    )
+                    test_client.ping()
+                    logger.info("Using localhost Redis connection for local development")
+                    redis_host = "localhost"
+                    test_client.close()
+                except Exception:
+                    # Localhost also failed, will continue with original host
+                    pass
+                
+            # Try to connect to Redis with better error handling
+            redis_client = Redis(
+                host=redis_host,
+                port=redis_port,
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                retry_on_timeout=True,
+                health_check_interval=30,
+                max_connections=50  # Connection pooling
+            )
+            redis_client.ping()
+            logger.info(f"Connected to Redis at {redis_host}:{redis_port} with connection pooling")
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
+        logger.warning("Operating without Redis - some features like job status tracking will be limited")
         redis_client = None
     
     # Initialize thread pool with optimal workers
@@ -100,9 +129,8 @@ app.add_middleware(
 )
 
 async def get_redis_client():
-    """Dependency to get Redis client"""
-    if not redis_client:
-        raise HTTPException(status_code=503, detail="Redis service unavailable")
+    """Dependency to get Redis client, returns None if Redis is unavailable"""
+    # Return None instead of raising an exception to allow routes to handle missing Redis
     return redis_client
 
 @app.get("/health")
@@ -192,7 +220,7 @@ async def submit_upscale(
                     break
                 await f.write(chunk)
         
-        # Store comprehensive job info in Redis with expiration
+        # Prepare job data
         job_data = {
             "status": "queued",
             "filename": file.filename,
@@ -204,26 +232,30 @@ async def submit_upscale(
             "temp_path": temp_path
         }
         
-        # Set job data with 24-hour expiration
-        redis_client.hset(f"job:{job_id}", mapping=job_data)
-        redis_client.expire(f"job:{job_id}", 86400)  # 24 hours
-        
-        # Add to processing queue with priority
-        queue_data = {
-            "job_id": job_id,
-            "priority": 1 if face_enhance else 0,  # Higher priority for face enhancement
-            "timestamp": timestamp
-        }
-        redis_client.lpush("processing_queue", f"{job_id}|{scale}|{face_enhance}")
+        # Store job info in Redis if available
+        if redis_client:
+            # Set job data with 24-hour expiration
+            redis_client.hset(f"job:{job_id}", mapping=job_data)
+            redis_client.expire(f"job:{job_id}", 86400)  # 24 hours
+            
+            # Add to processing queue with priority
+            queue_data = {
+                "job_id": job_id,
+                "priority": 1 if face_enhance else 0,  # Higher priority for face enhancement
+                "timestamp": timestamp
+            }
+            redis_client.lpush("processing_queue", f"{job_id}|{scale}|{face_enhance}")
+            
+            # Update queue stats
+            redis_client.incr("stats:total_jobs")
+            redis_client.incr("stats:queued_jobs")
+        else:
+            logger.warning(f"Redis unavailable: job {job_id} not tracked in Redis")
         
         # Submit to Celery worker asynchronously
         background_tasks.add_task(
             lambda: upscale_image.delay(job_id, temp_path, scale, face_enhance)
         )
-        
-        # Update queue stats
-        redis_client.incr("stats:total_jobs")
-        redis_client.incr("stats:queued_jobs")
         
         logger.info(f"Job {job_id} queued: {file.filename} ({file.size} bytes, scale={scale})")
         
@@ -255,6 +287,17 @@ async def get_status(
     """Get job status with enhanced information"""
     
     try:
+        # Handle case where Redis is unavailable
+        if redis_client is None:
+            # If Redis is unavailable, we can't retrieve status
+            # Return a reasonable fallback response with limited information
+            return {
+                "status": "unknown",
+                "message": "Job status tracking unavailable (Redis not connected)",
+                "job_id": job_id,
+                "fallback": True
+            }
+            
         job_data = redis_client.hgetall(f"job:{job_id}")
         
         if not job_data:
@@ -294,6 +337,18 @@ async def get_queue_stats(
 ):
     """Get queue statistics"""
     
+    # Handle case where Redis is unavailable
+    if redis_client is None:
+        return {
+            "queue_length": 0,
+            "total_jobs": 0,
+            "queued_jobs": 0,
+            "status_counts": {"queued": 0, "processing": 0, "completed": 0, "failed": 0},
+            "system_load": psutil.getloadavg() if hasattr(psutil, 'getloadavg') else "N/A",
+            "redis_available": False,
+            "message": "Queue tracking unavailable (Redis not connected)"
+        }
+    
     try:
         queue_length = redis_client.llen("processing_queue")
         total_jobs = redis_client.get("stats:total_jobs") or 0
@@ -316,7 +371,8 @@ async def get_queue_stats(
             "total_jobs": int(total_jobs),
             "queued_jobs": int(queued_jobs),
             "status_counts": status_counts,
-            "system_load": psutil.getloadavg() if hasattr(psutil, 'getloadavg') else "N/A"
+            "system_load": psutil.getloadavg() if hasattr(psutil, 'getloadavg') else "N/A",
+            "redis_available": True
         }
         
     except Exception as e:

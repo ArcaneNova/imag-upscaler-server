@@ -51,6 +51,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH=/home/appuser/.local/bin:$PATH
 ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
+ENV DOCKER_CONTAINER=1
 
 # Switch to non-root user
 USER appuser
