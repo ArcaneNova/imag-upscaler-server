@@ -118,6 +118,14 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Root endpoint that redirects to docs
+from fastapi.responses import RedirectResponse
+
+@app.get("/")
+async def root():
+    """Redirect to API documentation"""
+    return RedirectResponse(url="/docs")
+
 # CORS configuration - restrict in production
 app.add_middleware(
     CORSMiddleware,

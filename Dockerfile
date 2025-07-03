@@ -52,6 +52,9 @@ RUN chown -R appuser:appuser /app
 # Ensure app directory is recognized as a Python package
 RUN test -f app/__init__.py || echo "# Python package" > app/__init__.py
 
+# Replace the diagnostic root main.py with a proper import redirector
+RUN echo '"""Import redirector for app.main"""\nfrom app.main import app' > main.py
+
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
