@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up Real-ESRGAN API server")
     
-    # Initialize Redis with connection pooling and fallback
+    # Initialize Redis with connection pooling and improved fallback mechanism
     try:
         # Get Redis host with multiple fallback options
         redis_host = os.getenv("REDIS_HOST", "redis")
@@ -48,37 +48,71 @@ async def lifespan(app: FastAPI):
             logger.warning("Redis disabled by environment variable - operating in local mode")
             redis_client = None
         else:
-            # Check if we're running in a local development environment
-            if redis_host == "redis" and not os.getenv("DOCKER_CONTAINER"):
-                # Try localhost as fallback for local development
+            # Determine the best Redis host to use with multiple fallbacks
+            candidate_hosts = []
+            
+            # First add the configured host
+            candidate_hosts.append(redis_host)
+            
+            # Add localhost as a fallback if not already in the list and not in Docker
+            if "localhost" not in candidate_hosts and not os.getenv("DOCKER_CONTAINER"):
+                candidate_hosts.append("localhost")
+            
+            # Add common alternative hostnames as fallbacks
+            if "127.0.0.1" not in candidate_hosts:
+                candidate_hosts.append("127.0.0.1")
+                
+            # Check for Railway-specific environment and add Railway Redis service name
+            if os.getenv("RAILWAY_ENVIRONMENT"):
+                railway_redis = os.getenv("RAILWAY_REDIS_SERVICE_HOST", "railway-redis")
+                if railway_redis not in candidate_hosts:
+                    candidate_hosts.append(railway_redis)
+            
+            # Try each host in order until one works
+            connected = False
+            connection_errors = []
+            
+            for host in candidate_hosts:
                 try:
+                    logger.info(f"Attempting Redis connection to {host}:{redis_port}")
                     test_client = Redis(
-                        host="localhost",
+                        host=host,
                         port=redis_port,
                         socket_timeout=2,
+                        socket_connect_timeout=2,
                         decode_responses=True
                     )
                     test_client.ping()
-                    logger.info("Using localhost Redis connection for local development")
-                    redis_host = "localhost"
+                    redis_host = host  # Use this working host
                     test_client.close()
-                except Exception:
-                    # Localhost also failed, will continue with original host
-                    pass
-                
-            # Try to connect to Redis with better error handling
-            redis_client = Redis(
-                host=redis_host,
-                port=redis_port,
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5,
-                retry_on_timeout=True,
-                health_check_interval=30,
-                max_connections=50  # Connection pooling
-            )
-            redis_client.ping()
-            logger.info(f"Connected to Redis at {redis_host}:{redis_port} with connection pooling")
+                    connected = True
+                    logger.info(f"Successfully connected to Redis at {host}:{redis_port}")
+                    break
+                except Exception as e:
+                    error_msg = f"Redis connection to {host}:{redis_port} failed: {str(e)}"
+                    connection_errors.append(error_msg)
+                    logger.warning(error_msg)
+            
+            if not connected:
+                logger.error(f"All Redis connection attempts failed: {connection_errors}")
+                logger.warning("Operating without Redis - some features like job status tracking will be limited")
+                redis_client = None
+            else:
+                # Use the working host for the main Redis client
+                redis_client = Redis(
+                    host=redis_host,
+                    port=redis_port,
+                    decode_responses=True,
+                    socket_timeout=5,
+                    socket_connect_timeout=5,
+                    retry_on_timeout=True,
+                    health_check_interval=30,
+                    max_connections=50,  # Connection pooling
+                    retry=3  # Add retry parameter
+                )
+                # Verify connection one more time
+                redis_client.ping()
+                logger.info(f"Connected to Redis at {redis_host}:{redis_port} with connection pooling")
     except Exception as e:
         logger.error(f"Redis connection failed: {e}")
         logger.warning("Operating without Redis - some features like job status tracking will be limited")
@@ -137,7 +171,48 @@ app.add_middleware(
 )
 
 async def get_redis_client():
-    """Dependency to get Redis client, returns None if Redis is unavailable"""
+    """
+    Dependency to get Redis client, returns None if Redis is unavailable.
+    Includes automatic reconnection attempts if Redis was disconnected.
+    """
+    global redis_client
+    
+    # If Redis was previously connected but now appears disconnected, try to reconnect
+    if redis_client is not None:
+        try:
+            # Test if the connection is still alive
+            redis_client.ping()
+        except Exception as e:
+            # Connection seems to be lost, try to reconnect
+            logger.warning(f"Redis connection lost, attempting to reconnect: {e}")
+            try:
+                # Close the existing connection if possible
+                try:
+                    redis_client.close()
+                except:
+                    pass
+                
+                # Get configured Redis parameters
+                redis_host = os.getenv("REDIS_HOST", "redis")
+                redis_port = int(os.getenv("REDIS_PORT", "6379"))
+                
+                # Try to reconnect
+                redis_client = Redis(
+                    host=redis_host,
+                    port=redis_port,
+                    decode_responses=True,
+                    socket_timeout=3,
+                    socket_connect_timeout=3,
+                    retry_on_timeout=True,
+                    health_check_interval=15,
+                    max_connections=50
+                )
+                redis_client.ping()
+                logger.info(f"Successfully reconnected to Redis at {redis_host}:{redis_port}")
+            except Exception as reconnect_err:
+                logger.error(f"Redis reconnection failed: {reconnect_err}")
+                redis_client = None
+    
     # Return None instead of raising an exception to allow routes to handle missing Redis
     return redis_client
 
