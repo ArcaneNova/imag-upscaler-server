@@ -41,11 +41,12 @@ COPY --from=builder /root/.local /home/appuser/.local
 # Create directories and set permissions
 RUN mkdir -p temp output weights logs /var/lib/redis /var/log/redis \
     && chown -R appuser:appuser /app /var/lib/redis /var/log/redis \
-    && chmod 755 /var/lib/redis /var/log/redis
+    && chmod 755 /var/lib/redis /var/log/redis \
+    && chmod 755 /usr/bin/redis-server /usr/bin/redis-cli
 
 # Copy application code including startup script
 COPY . .
-RUN chmod +x start-api.sh
+RUN chmod +x start-api.sh entrypoint.sh
 
 # Set ownership
 RUN chown -R appuser:appuser /app /var/lib/redis /var/log/redis
@@ -81,4 +82,4 @@ EXPOSE 8000 6379
 # Startup script already copied and made executable above
 
 # Default command for API server
-CMD ["./start-api.sh"]
+CMD ["./entrypoint.sh"]

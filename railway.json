@@ -5,6 +5,9 @@
   "deploy": {
     "numReplicas": 1,
     "sleepApplication": false,
-    "restartPolicyType": "ON_FAILURE"
+    "restartPolicyType": "ON_FAILURE",
+    "startCommand": "./entrypoint.sh",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300
   }
 }
