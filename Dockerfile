@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # Production stage
 FROM python:3.11-slim
 
-# Install runtime dependencies
+# Install runtime dependencies including Redis
 RUN apt-get update && apt-get install -y \
     curl \
     libgl1-mesa-glx \
@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    redis-server \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -38,15 +39,16 @@ WORKDIR /app
 COPY --from=builder /root/.local /home/appuser/.local
 
 # Create directories and set permissions
-RUN mkdir -p temp output weights logs \
-    && chown -R appuser:appuser /app
+RUN mkdir -p temp output weights logs /var/lib/redis /var/log/redis \
+    && chown -R appuser:appuser /app /var/lib/redis /var/log/redis \
+    && chmod 755 /var/lib/redis /var/log/redis
 
 # Copy application code including startup script
 COPY . .
 RUN chmod +x start-api.sh
 
 # Set ownership
-RUN chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /app /var/lib/redis /var/log/redis
 
 # Ensure app directory is recognized as a Python package
 RUN test -f app/__init__.py || echo "# Python package" > app/__init__.py
@@ -73,8 +75,8 @@ USER appuser
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Expose port
-EXPOSE 8000
+# Expose ports
+EXPOSE 8000 6379
 
 # Startup script already copied and made executable above
 
