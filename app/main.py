@@ -41,18 +41,41 @@ async def lifespan(app: FastAPI):
     # Force local Redis setup - always use local Redis server only
     logger.info("Forcing local Redis configuration - removing all external Redis settings")
     
-    # Clear any external Redis URLs to force local connection only
-    if "REDIS_URL" in os.environ:
-        del os.environ["REDIS_URL"]
-        logger.info("Removed REDIS_URL environment variable")
-    if "REDISURL" in os.environ:
-        del os.environ["REDISURL"]
-        logger.info("Removed REDISURL environment variable")
+    # Clear ALL possible external Redis environment variables
+    redis_vars_to_clear = [
+        "REDIS_URL", "REDISURL", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD",
+        "REDIS_TLS_URL", "REDIS_PRIVATE_URL", "REDIS_USERNAME", "REDIS_DB",
+        "REDISCLOUD_URL", "REDISTOGO_URL", "OPENREDIS_URL", "REDISGREEN_URL",
+        "REDIS_MASTER_SERVICE_HOST", "REDIS_MASTER_SERVICE_PORT"
+    ]
     
-    # Force local Redis configuration
+    for var in redis_vars_to_clear:
+        if var in os.environ:
+            del os.environ[var]
+            logger.info(f"Removed {var} environment variable")
+    
+    # Force local Redis configuration and prevent any external connections
     os.environ["REDIS_HOST"] = "127.0.0.1"
     os.environ["REDIS_PORT"] = "6379"
     os.environ["REDIS_DISABLE"] = "false"
+    
+    logger.info("✅ All external Redis environment variables cleared")
+    logger.info("✅ Local Redis configuration enforced")
+    
+    # Debug: Log all remaining Redis-related environment variables
+    logger.info("=== Current Redis Environment Variables ===")
+    for key, value in os.environ.items():
+        if 'redis' in key.lower() or 'REDIS' in key:
+            logger.info(f"{key}={value}")
+    logger.info("=== End Redis Environment Variables ===")
+    
+    # Also check for any service discovery variables that might affect Redis
+    k8s_vars = [k for k in os.environ.keys() if 'SERVICE' in k and 'REDIS' in k.upper()]
+    if k8s_vars:
+        logger.warning(f"Found Kubernetes service discovery variables: {k8s_vars}")
+        for var in k8s_vars:
+            logger.warning(f"Removing {var}={os.environ[var]}")
+            del os.environ[var]
     
     # Check if Redis is already running locally
     try:
