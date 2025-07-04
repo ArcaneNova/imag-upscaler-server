@@ -491,23 +491,118 @@ async def submit_upscale(
                     detail=f"Direct processing failed: {str(direct_err)}"
                 )
         else:
-            # Submit to Celery worker asynchronously for background processing
-            from app.worker import upscale_image
-            background_tasks.add_task(
-                lambda: upscale_image.delay(job_id, temp_path, scale, face_enhance)
-            )
-            
-            logger.info(f"Job {job_id} queued: {file.filename} ({file.size} bytes, scale={scale})")
-            
-            return {
-                "job_id": job_id,
-                "status": "queued",
-                "message": "Image submitted for upscaling",
-                "estimated_time": "30-120 seconds",
-                "parameters": {
-                    "scale": scale,
-                    "face_enhance": face_enhance
+            # Try to submit to Celery worker asynchronously for background processing
+            try:
+                from app.worker import upscale_image
+                
+                # Test Celery connection first
+                celery_task = upscale_image.delay(job_id, temp_path, scale, face_enhance)
+                
+                logger.info(f"Job {job_id} queued via Celery: {file.filename} ({file.size} bytes, scale={scale})")
+                
+                return {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "message": "Image submitted for upscaling via background worker",
+                    "estimated_time": "30-120 seconds",
+                    "parameters": {
+                        "scale": scale,
+                        "face_enhance": face_enhance
+                    }
                 }
+                
+            except Exception as celery_err:
+                logger.warning(f"Celery submission failed: {celery_err}")
+                logger.info(f"Falling back to direct processing for job {job_id}")
+                
+                # Fall back to direct processing
+                try:
+                    # Import and use upscaler directly
+                    from app.upscale import run_upscale
+                    
+                    # Define output path
+                    output_path = f"output/{job_id}_{int(timestamp)}.png"
+                    
+                    # Run upscaling directly
+                    run_upscale(temp_path, output_path, scale, face_enhance)
+                    
+                    # Check if the output file exists
+                    if not os.path.exists(output_path):
+                        raise ValueError("Upscaling failed to produce output file")
+                    
+                    # Handle file upload to Cloudinary
+                    cloudinary_url = None
+                    try:
+                        import cloudinary
+                        import cloudinary.uploader
+                        
+                        if all([
+                            os.getenv("CLOUDINARY_CLOUD_NAME"),
+                            os.getenv("CLOUDINARY_API_KEY"),
+                            os.getenv("CLOUDINARY_API_SECRET")
+                        ]):
+                            # Configure Cloudinary
+                            cloudinary.config(
+                                cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+                                api_key=os.getenv("CLOUDINARY_API_KEY"),
+                                api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+                                secure=True
+                            )
+                            
+                            # Upload to Cloudinary
+                            upload_result = cloudinary.uploader.upload(
+                                output_path,
+                                folder="realesrgan_upscales",
+                                resource_type="image"
+                            )
+                            
+                            cloudinary_url = upload_result.get("secure_url")
+                            logger.info(f"Image uploaded to Cloudinary: {cloudinary_url}")
+                    except Exception as cloud_err:
+                        logger.error(f"Cloudinary upload failed: {cloud_err}")
+                    
+                    # Update job data
+                    completion_time = time.time()
+                    processing_time = completion_time - timestamp
+                    
+                    # Store result in Redis if available
+                    if redis_client:
+                        result_data = {
+                            "status": "completed",
+                            "completed_at": completion_time,
+                            "processing_time": processing_time,
+                            "result_url": cloudinary_url or "",
+                            "output_path": output_path
+                        }
+                        redis_client.hset(f"job:{job_id}", mapping=result_data)
+                    
+                    # Clean up temp file
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    
+                    # Return the result directly
+                    return {
+                        "job_id": job_id,
+                        "status": "completed",
+                        "processing_time": f"{processing_time:.2f} seconds",
+                        "result_url": cloudinary_url,
+                        "message": "Image upscaled successfully (fallback processing)",
+                        "parameters": {
+                            "scale": scale,
+                            "face_enhance": face_enhance
+                        }
+                    }
+                    
+                except Exception as fallback_err:
+                    logger.error(f"Fallback processing also failed: {fallback_err}")
+                    # Clean up temp files
+                    for path in [temp_path, f"output/{job_id}_{int(timestamp)}.png"]:
+                        if os.path.exists(path):
+                            os.remove(path)
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Both Celery and fallback processing failed: {str(fallback_err)}"
+                    )
             }
         
     except Exception as e:
