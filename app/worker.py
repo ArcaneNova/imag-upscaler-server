@@ -70,16 +70,6 @@ def redis_connection():
                 redis_client.close()
             except Exception:
                 pass
-        redis_client.ping()
-        logger.info(f"Connected to Redis at {redis_host}:{redis_port}")
-        yield redis_client
-    except Exception as e:
-        logger.warning(f"Redis connection error (falling back to local storage): {e}")
-        logger.warning("Operating without Redis - job status updates will not be available")
-        yield None
-    finally:
-        if redis_client:
-            redis_client.close()
 
 @celery.task(name="upscale_image", bind=True)
 def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhance: bool = False):
