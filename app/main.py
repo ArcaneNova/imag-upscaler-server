@@ -211,6 +211,15 @@ async def root():
     """Redirect to API documentation"""
     return RedirectResponse(url="/docs")
 
+@app.get("/status")
+async def simple_status():
+    """Simple status endpoint for basic health checks"""
+    return {
+        "status": "ok",
+        "service": "realesrgan-api",
+        "timestamp": time.time()
+    }
+
 # CORS configuration - restrict in production
 app.add_middleware(
     CORSMiddleware,
@@ -295,13 +304,22 @@ async def get_redis_client():
 
 @app.get("/health")
 async def health_check():
-    """Enhanced health check endpoint"""
+    """Enhanced health check endpoint with debugging information"""
     health_data = {
         "status": "healthy",
         "timestamp": time.time(),
         "version": "2.0.0",
         "redis": "disconnected",
-        "system": {}
+        "system": {},
+        "debug": {
+            "docker_container": os.getenv("DOCKER_CONTAINER"),
+            "redis_host": os.getenv("REDIS_HOST"),
+            "redis_port": os.getenv("REDIS_PORT"),
+            "redis_disable": os.getenv("REDIS_DISABLE"),
+            "redis_url": "***" if os.getenv("REDIS_URL") else None,
+            "working_directory": os.getcwd(),
+            "python_path": os.getenv("PYTHONPATH")
+        }
     }
     
     # Check Redis
@@ -322,7 +340,7 @@ async def health_check():
     # System metrics
     try:
         health_data["system"] = {
-            "cpu_usage": f"{psutil.cpu_percent(interval=1):.1f}%",
+            "cpu_usage": f"{psutil.cpu_percent(interval=0.1):.1f}%",
             "memory_usage": f"{psutil.virtual_memory().percent:.1f}%",
             "disk_usage": f"{psutil.disk_usage('/').percent:.1f}%",
             "load_average": psutil.getloadavg() if hasattr(psutil, 'getloadavg') else "N/A"

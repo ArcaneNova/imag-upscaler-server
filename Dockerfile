@@ -39,9 +39,8 @@ WORKDIR /app
 COPY --from=builder /root/.local /home/appuser/.local
 
 # Create directories and set permissions
-RUN mkdir -p temp output weights logs /var/lib/redis /var/log/redis \
-    && chown -R appuser:appuser /app /var/lib/redis /var/log/redis \
-    && chmod 755 /var/lib/redis /var/log/redis \
+RUN mkdir -p temp output weights logs \
+    && chown -R appuser:appuser /app \
     && chmod 755 /usr/bin/redis-server /usr/bin/redis-cli
 
 # Copy application code including startup script
@@ -49,7 +48,7 @@ COPY . .
 RUN chmod +x start-api.sh entrypoint.sh
 
 # Set ownership
-RUN chown -R appuser:appuser /app /var/lib/redis /var/log/redis
+RUN chown -R appuser:appuser /app
 
 # Ensure app directory is recognized as a Python package
 RUN test -f app/__init__.py || echo "# Python package" > app/__init__.py
@@ -65,9 +64,10 @@ ENV OMP_NUM_THREADS=1
 ENV MKL_NUM_THREADS=1
 ENV DOCKER_CONTAINER=1
 
-# Debug the Python path
-RUN python -c "import sys; print('Python path:', sys.path)"
-RUN python -c "import os; print('App files:', os.listdir('/app/app'))"
+# Debug the Python path and files
+RUN python -c "import sys; print('Python path:', sys.path)" || echo "Python path check failed"
+RUN ls -la /app/ || echo "App directory listing failed"
+RUN ls -la /app/app/ || echo "App/app directory listing failed"
 
 # Switch to non-root user
 USER appuser
