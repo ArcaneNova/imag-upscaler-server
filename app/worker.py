@@ -48,9 +48,7 @@ def redis_connection():
             port=6379,
             decode_responses=True,
             socket_timeout=5,
-            socket_connect_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=15
+            socket_connect_timeout=5
         )
         
         # Test the connection with a ping

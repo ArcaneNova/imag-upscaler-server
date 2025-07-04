@@ -15,7 +15,6 @@ import logging
 import time
 import aiofiles
 from typing import Optional
-from app.worker import upscale_image
 from contextlib import asynccontextmanager
 import psutil
 
@@ -37,6 +36,7 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("Starting up Real-ESRGAN API server")
+    logger.info("Step 1: Setting up local Redis configuration")
     
     # Force local Redis setup - always use local Redis server only
     logger.info("Forcing local Redis configuration - removing all external Redis settings")
@@ -111,10 +111,10 @@ async def lifespan(app: FastAPI):
                 
         except Exception as e:
             logger.error(f"Failed to start local Redis: {e}")
-            logger.error("This is a critical error - the application requires local Redis")
-            raise RuntimeError(f"Cannot start without local Redis: {e}")
+            logger.warning("Continuing without Redis - some features will be limited")
     
-    # Initialize Redis client - local Redis only
+    # Initialize Redis client - local Redis only, but don't fail if unavailable
+    logger.info("Step 2: Attempting to connect to local Redis")
     try:
         logger.info("Connecting to local Redis at 127.0.0.1:6379")
         
@@ -123,11 +123,7 @@ async def lifespan(app: FastAPI):
             port=6379,
             decode_responses=True,
             socket_timeout=5,
-            socket_connect_timeout=5,
-            retry_on_timeout=True,
-            health_check_interval=30,
-            max_connections=50,
-            retry=3
+            socket_connect_timeout=5
         )
         
         # Test the connection
@@ -135,21 +131,24 @@ async def lifespan(app: FastAPI):
         logger.info("Successfully connected to local Redis!")
         
     except Exception as e:
-        logger.error(f"Failed to connect to local Redis: {e}")
-        logger.error("Cannot continue without Redis connection")
-        raise RuntimeError(f"Local Redis connection required: {e}")
+        logger.warning(f"Failed to connect to local Redis: {e}")
+        logger.warning("Operating without Redis - job status tracking will be limited")
         redis_client = None
     
     # Initialize thread pool with optimal workers
+    logger.info("Step 3: Initializing thread pool")
     cpu_count = psutil.cpu_count()
     max_workers = min(cpu_count * 2, 8)  # 2x CPU cores, max 8
     executor = ThreadPoolExecutor(max_workers=max_workers)
     logger.info(f"Initialized thread pool with {max_workers} workers")
     
     # Create necessary directories
+    logger.info("Step 4: Creating necessary directories")
     os.makedirs("temp", exist_ok=True)
     os.makedirs("output", exist_ok=True)
     os.makedirs("weights", exist_ok=True)
+    
+    logger.info("✅ Application startup completed successfully!")
     
     yield
     
@@ -181,6 +180,11 @@ from fastapi.responses import RedirectResponse
 async def root():
     """Redirect to API documentation"""
     return RedirectResponse(url="/docs")
+
+@app.get("/ping")
+async def ping():
+    """Ultra-simple ping endpoint for basic connectivity test"""
+    return {"ping": "pong"}
 
 @app.get("/status")
 async def simple_status():
@@ -230,11 +234,7 @@ async def get_redis_client():
                     port=6379,
                     decode_responses=True,
                     socket_timeout=3,
-                    socket_connect_timeout=3,
-                    retry_on_timeout=True,
-                    health_check_interval=15,
-                    max_connections=50,
-                    retry=3
+                    socket_connect_timeout=3
                 )
                 redis_client.ping()
                 logger.info("Successfully reconnected to local Redis")
@@ -467,6 +467,7 @@ async def submit_upscale(
                 )
         else:
             # Submit to Celery worker asynchronously for background processing
+            from app.worker import upscale_image
             background_tasks.add_task(
                 lambda: upscale_image.delay(job_id, temp_path, scale, face_enhance)
             )

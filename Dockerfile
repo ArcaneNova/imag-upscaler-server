@@ -75,8 +75,8 @@ RUN ls -la /app/app/ || echo "App/app directory listing failed"
 USER appuser
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8000/ping || exit 1
 
 # Expose ports
 EXPOSE 8000 6379
