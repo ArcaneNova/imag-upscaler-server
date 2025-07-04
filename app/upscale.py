@@ -70,11 +70,28 @@ def get_model(scale: int = 2):
             if scale == 2:
                 model_name = "RealESRGAN_x2plus"
                 netscale = 2
+                # Create the model architecture for 2x upscaling
+                model_arch = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=2)
             elif scale == 4:
                 model_name = "RealESRGAN_x4plus"
                 netscale = 4
+                # Create the model architecture for 4x upscaling
+                model_arch = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
             else:
                 raise ValueError(f"Unsupported scale: {scale}")
+            
+            logger.info(f"Creating model architecture: {model_name} (scale={netscale})")
+            logger.info(f"Model architecture parameters: num_feat=64, num_block=23, num_grow_ch=32")
+            
+            # Verify the model architecture was created successfully
+            if model_arch is None:
+                raise RuntimeError(f"Failed to create model architecture for {model_name}")
+            
+            logger.info(f"Model architecture created successfully: {type(model_arch)}")
+            
+            # Move model to appropriate device
+            model_arch = model_arch.to(device)
+            logger.info(f"Model architecture moved to device: {device}")
                 
             # Define models directory in the current working directory
             models_dir = os.path.join(os.getcwd(), 'weights')
@@ -113,6 +130,8 @@ def get_model(scale: int = 2):
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model file not found after download: {model_path}")
             
+            logger.info(f"Model weights file exists: {model_path} ({os.path.getsize(model_path)} bytes)")
+            
             # Optimize tile size based on available memory
             # Smaller tiles use less memory but may be slower
             tile_size = 512
@@ -120,12 +139,15 @@ def get_model(scale: int = 2):
                 tile_size = 256  # Use smaller tiles when memory constrained
                 logger.info(f"Using smaller tile size ({tile_size}) due to memory constraints")
             
-            # Initialize RealESRGANer with memory-optimized parameters
+            logger.info(f"Creating model architecture: {model_arch}")
+            logger.info(f"Model device: {device}, netscale: {netscale}")
+            
+            # Initialize RealESRGANer with explicit model architecture
             model = RealESRGANer(
                 scale=netscale,
                 model_path=model_path,
                 dni_weight=None,
-                model=None,  # Let the library create the appropriate model
+                model=model_arch,  # Pass the explicitly created model architecture
                 half=device == 'cuda',  # Use half precision for CUDA
                 tile=tile_size,    # Tile size for processing large images
                 tile_pad=10, # Padding for tiles to avoid seams
@@ -133,11 +155,17 @@ def get_model(scale: int = 2):
                 device=device
             )
             
+            logger.info(f"RealESRGANer initialized successfully")
             _models[model_key] = model
             logger.info(f"Real-ESRGAN {scale}x model loaded on {device}")
             
         except Exception as e:
             logger.error(f"Failed to load model {model_key}: {e}")
+            logger.error(f"Model architecture: {model_arch if 'model_arch' in locals() else 'None'}")
+            logger.error(f"Model path: {model_path if 'model_path' in locals() else 'None'}")
+            logger.error(f"Device: {device if 'device' in locals() else 'None'}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
             
     return _models[model_key]
