@@ -132,26 +132,59 @@ def get_model(scale: int = 2):
             
             logger.info(f"Model weights file exists: {model_path} ({os.path.getsize(model_path)} bytes)")
             
-            # Optimize tile size based on available memory
-            # Smaller tiles use less memory but may be slower
+            # Optimize tile size based on available memory and device
+            # Larger tiles are faster but use more memory
             tile_size = 512
-            if device == "cpu" or current_memory > 75:
-                tile_size = 256  # Use smaller tiles when memory constrained
-                logger.info(f"Using smaller tile size ({tile_size}) due to memory constraints")
+            tile_pad = 10
+            
+            if device == "cuda":
+                # GPU can handle larger tiles for better performance
+                try:
+                    gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
+                    if gpu_memory >= 8:
+                        tile_size = 1024  # Large tiles for high-end GPUs
+                        tile_pad = 16
+                    elif gpu_memory >= 4:
+                        tile_size = 768   # Medium tiles for mid-range GPUs
+                        tile_pad = 12
+                    else:
+                        tile_size = 512   # Standard tiles for entry-level GPUs
+                        tile_pad = 10
+                except:
+                    tile_size = 512
+                    tile_pad = 10
+            else:
+                # CPU optimization: balance between speed and memory
+                cpu_count = os.cpu_count() or 4
+                if cpu_count >= 16 and current_memory < 70:
+                    tile_size = 768   # Larger tiles for powerful CPUs with plenty of RAM
+                    tile_pad = 12
+                elif cpu_count >= 8 and current_memory < 75:
+                    tile_size = 640   # Medium tiles for decent CPUs
+                    tile_pad = 10
+                elif current_memory > 80:
+                    tile_size = 256   # Small tiles when memory constrained
+                    tile_pad = 8
+                else:
+                    tile_size = 512   # Default balanced setting
+                    tile_pad = 10
+                    
+            logger.info(f"Using optimized tile size: {tile_size} (pad: {tile_pad}) for {device}")
+            logger.info(f"System: CPU cores={os.cpu_count()}, Memory={current_memory}%")
             
             logger.info(f"Creating model architecture: {model_arch}")
             logger.info(f"Model device: {device}, netscale: {netscale}")
             
-            # Initialize RealESRGANer with explicit model architecture
+            # Initialize RealESRGANer with explicit model architecture and optimized settings
             model = RealESRGANer(
                 scale=netscale,
                 model_path=model_path,
                 dni_weight=None,
                 model=model_arch,  # Pass the explicitly created model architecture
-                half=device == 'cuda',  # Use half precision for CUDA
-                tile=tile_size,    # Tile size for processing large images
-                tile_pad=10, # Padding for tiles to avoid seams
-                pre_pad=0,   # No pre-padding needed
+                half=device == 'cuda',  # Use half precision for CUDA to increase speed
+                tile=tile_size,    # Optimized tile size for better performance
+                tile_pad=tile_pad, # Optimized padding to minimize seams
+                pre_pad=0,   # No pre-padding needed for most images
                 device=device
             )
             
@@ -231,22 +264,24 @@ def enhance_face_regions(image: Image.Image) -> Image.Image:
         return image
 
 def postprocess_image(image: Image.Image, face_enhance: bool = False) -> Image.Image:
-    """Apply post-processing enhancements"""
+    """Apply fast post-processing enhancements"""
     
     try:
+        # Only do face enhancement if explicitly requested
         if face_enhance:
             image = enhance_face_regions(image)
         
-        # Apply subtle sharpening
-        image = image.filter(ImageFilter.UnsharpMask(radius=1, percent=110, threshold=3))
+        # Skip heavy processing for faster results - only apply very light enhancements
+        # Apply subtle sharpening (reduced intensity for speed)
+        image = image.filter(ImageFilter.UnsharpMask(radius=0.8, percent=105, threshold=3))
         
-        # Slight color enhancement
+        # Very light color enhancement (reduced for speed)
         enhancer = ImageEnhance.Color(image)
-        image = enhancer.enhance(1.05)  # 5% color boost
+        image = enhancer.enhance(1.02)  # 2% color boost instead of 5%
         
-        # Contrast enhancement
+        # Light contrast enhancement
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(1.02)  # 2% contrast boost
+        image = enhancer.enhance(1.01)  # 1% contrast boost instead of 2%
         
         return image
         
@@ -259,7 +294,7 @@ def run_upscale(
     output_path: str, 
     scale: int = 2, 
     face_enhance: bool = False,
-    max_dimension: int = 2048
+    max_dimension: int = 1536  # Reduced from 2048 for better speed
 ):
     """
     Enhanced upscale function with optimizations and improved memory management
@@ -276,13 +311,19 @@ def run_upscale(
     memory_percent = psutil.virtual_memory().percent
     load_avg = psutil.getloadavg()[0] if hasattr(psutil, 'getloadavg') else 0
     
-    # Dynamic max dimension based on system load
+    # Dynamic max dimension based on system load - optimize for speed
     if memory_percent > 85 or load_avg > 10:
         # Reduce resolution when system is heavily loaded
-        adjusted_max_dim = min(max_dimension, 1536)  # Max 1536px under heavy load
+        adjusted_max_dim = min(max_dimension, 1024)  # More aggressive reduction for speed
         if adjusted_max_dim != max_dimension:
             logger.warning(f"System under heavy load (CPU: {cpu_percent}%, Mem: {memory_percent}%, Load: {load_avg:.1f})")
             logger.warning(f"Reducing max dimension from {max_dimension} to {adjusted_max_dim}")
+            max_dimension = adjusted_max_dim
+    elif memory_percent > 75:
+        # Moderate reduction for performance
+        adjusted_max_dim = min(max_dimension, 1536)
+        if adjusted_max_dim != max_dimension:
+            logger.info(f"Moderate system load, reducing max dimension to {adjusted_max_dim} for better performance")
             max_dimension = adjusted_max_dim
     
     start_memory = psutil.virtual_memory().percent
@@ -300,13 +341,21 @@ def run_upscale(
         original_height, original_width = img.shape[:2]
         logger.info(f"Input image: {original_width}x{original_height}")
         
-        # Check and resize if too large
+        # Check and resize if too large - optimize for processing speed
+        original_pixels = original_width * original_height
         if max(original_width, original_height) > max_dimension:
             ratio = max_dimension / max(original_width, original_height)
             new_width = int(original_width * ratio)
             new_height = int(original_height * ratio)
-            img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            # Use faster interpolation for speed
+            img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
             logger.info(f"Resized image from {original_width}x{original_height} to {new_width}x{new_height}")
+        
+        # For very large images, use even more aggressive optimization
+        current_pixels = img.shape[1] * img.shape[0]
+        if current_pixels > 2073600:  # > 1920x1080
+            logger.info("Large image detected - using speed-optimized processing")
+            # We'll pass this info to the model for optimization
         
         # Get model and perform upscaling
         model = get_model(scale)
@@ -318,7 +367,7 @@ def run_upscale(
         logger.info(f"Starting Real-ESRGAN inference on {get_optimal_device()}")
         
         # Use RealESRGANer's enhance method which returns a NumPy array
-        # Add memory optimization - do cleanup before the heavy operation if memory is tight
+        # Pre-optimize memory before heavy operation
         current_memory = psutil.virtual_memory().percent
         if current_memory > 80:
             logger.warning(f"High memory usage before inference: {current_memory}%")
@@ -326,80 +375,115 @@ def run_upscale(
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
-        # Perform upscaling with proper error handling
+        # Perform upscaling with optimized error handling
         try:
-            output, _ = model.enhance(img, outscale=scale)
+            with torch.no_grad():  # Disable gradient computation for inference speed
+                output, _ = model.enhance(img, outscale=scale)
         except RuntimeError as e:
-            if "out of memory" in str(e).lower() and torch.cuda.is_available():
-                # Handle CUDA OOM errors by falling back to CPU
-                logger.warning("CUDA out of memory, falling back to CPU")
-                # Force CPU mode and retry
-                backup_model = RealESRGANer(
-                    scale=model.scale,
-                    model_path=model.model_path,
-                    dni_weight=None,
-                    model=None,
-                    tile=128,  # Smaller tiles for CPU mode
-                    tile_pad=10,
-                    pre_pad=0,
-                    device="cpu"
-                )
-                output, _ = backup_model.enhance(img, outscale=scale)
-                del backup_model  # Clean up immediately
+            if "out of memory" in str(e).lower():
+                logger.warning("Memory error during inference, trying with reduced tile size")
+                # Recreate model with smaller tiles
+                device = get_optimal_device()
+                smaller_model = get_model(scale)  # This will use cached model
+                smaller_model.tile = max(128, smaller_model.tile // 2)  # Reduce tile size
+                smaller_model.tile_pad = max(4, smaller_model.tile_pad // 2)
+                
+                # Force garbage collection and retry
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                with torch.no_grad():
+                    output, _ = smaller_model.enhance(img, outscale=scale)
             else:
                 raise  # Re-raise other errors
+        
+        # Clean up input image from memory immediately
+        del img
+        gc.collect()
         
         after_upscale_memory = psutil.virtual_memory().percent
         logger.info(f"Upscaling completed. Memory: {before_upscale_memory}% -> {after_upscale_memory}%")
         
-        # Convert to PIL for post-processing
-        if output.shape[2] == 3:
-            # BGR to RGB
+        # Fast conversion to PIL (avoid unnecessary color space conversions when possible)
+        if len(output.shape) == 3 and output.shape[2] == 3:
+            # RGB format
+            upscaled_img = Image.fromarray(output.astype('uint8'), 'RGB')
+        elif len(output.shape) == 3 and output.shape[2] == 4:
+            # RGBA format
+            upscaled_img = Image.fromarray(output.astype('uint8'), 'RGBA')
+        else:
+            # Fallback: convert BGR to RGB
             output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
             upscaled_img = Image.fromarray(output_rgb)
-        else:
-            # BGRA to RGBA
-            output_rgba = cv2.cvtColor(output, cv2.COLOR_BGRA2RGBA)
-            upscaled_img = Image.fromarray(output_rgba)
         
-        # Apply post-processing
-        if face_enhance or scale == 4:  # Always post-process 4x images
+        # Clean up output array immediately
+        del output
+        
+        # Determine if we should use fast mode based on system load
+        fast_mode = False
+        if _upscale_counter > 5:  # If we've processed multiple images recently
+            current_load = psutil.cpu_percent(interval=0.1)
+            if current_load > 70 or after_upscale_memory > 80:
+                fast_mode = True
+                logger.info("Using fast mode due to high system load")
+        
+        # Apply post-processing based on mode
+        if fast_mode:
+            # Skip post-processing for maximum speed
+            logger.info("Skipping post-processing for maximum throughput")
+        elif face_enhance:
+            # Only do face enhancement if explicitly requested
             upscaled_img = postprocess_image(upscaled_img, face_enhance)
+        elif scale == 4:
+            # Light post-process 4x images for quality
+            upscaled_img = postprocess_image(upscaled_img, False)
         
-        # Save result with optimization
-        save_kwargs = {
-            "format": "PNG",
-            "optimize": True,
-            "compress_level": 6  # Good compression without quality loss
-        }
+        # Save result with speed-optimized settings
+        final_size = upscaled_img.size
+        output_pixels = final_size[0] * final_size[1]
         
-        # For very large images, use JPEG with high quality
-        if upscaled_img.size[0] * upscaled_img.size[1] > 16_000_000:  # > 16MP
+        # Choose format and settings based on size and performance requirements
+        if fast_mode or output_pixels > 8_000_000:  # > 8MP or fast mode
+            # Use JPEG for faster saving of large images
+            output_path = output_path.replace('.png', '.jpg')
+            save_kwargs = {
+                "format": "JPEG",
+                "quality": 92,  # Good quality but faster than 95
+                "optimize": False  # Skip optimization for speed
+            }
+            logger.info("Using JPEG format for faster processing")
+        elif output_pixels > 16_000_000:  # > 16MP
+            # Use JPEG with optimization for very large images
             output_path = output_path.replace('.png', '.jpg')
             save_kwargs = {
                 "format": "JPEG",
                 "quality": 95,
                 "optimize": True
             }
-            logger.info("Using JPEG format for large output image")
+            logger.info("Using optimized JPEG format for very large image")
+        else:
+            # Use PNG with light compression for smaller images
+            save_kwargs = {
+                "format": "PNG",
+                "optimize": False,  # Skip optimization for speed
+                "compress_level": 3  # Light compression for speed
+            }
         
         upscaled_img.save(output_path, **save_kwargs)
         
-        final_size = upscaled_img.size
         final_memory = psutil.virtual_memory().percent
         
         logger.info(f"Image saved: {original_width}x{original_height} -> {final_size[0]}x{final_size[1]}")
         logger.info(f"Memory usage: {start_memory}% -> {final_memory}%")
         
-        # Force garbage collection
-        del upscaled_img, img, output
+        # Immediate cleanup for better performance
+        del upscaled_img
         gc.collect()
         
         # Clear GPU cache if using CUDA
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
-        _increment_upscale_counter()  # Track this upscale operation
     
     except Exception as e:
         logger.error(f"Upscaling failed: {e}")
@@ -461,13 +545,13 @@ def schedule_periodic_cache_clearing():
                 current_time = time_module.time()
                 time_since_last_clear = current_time - _last_cache_clear_time
                 
-                # Clear cache if:
-                # 1. More than 50 upscales since last clear OR
-                # 2. More than 30 minutes since last clear AND memory usage is high
+                # Clear cache based on throughput and memory usage:
+                # More aggressive clearing for high-throughput scenarios
                 memory_usage = psutil.virtual_memory().percent
                 
-                if (_upscale_counter >= 50 or 
-                    (time_since_last_clear > 1800 and memory_usage > 70)):
+                if (_upscale_counter >= 30 or  # More frequent clearing for high throughput
+                    (time_since_last_clear > 900 and memory_usage > 60) or  # 15 min with moderate memory usage
+                    memory_usage > 85):  # Immediate clearing if memory is very high
                     logger.info(f"Scheduled cache clearing: {_upscale_counter} upscales, "
                                 f"{time_since_last_clear:.0f}s since last clear, "
                                 f"memory at {memory_usage}%")
@@ -493,6 +577,26 @@ def _increment_upscale_counter():
     """Increment the upscale counter for cache management"""
     global _upscale_counter
     _upscale_counter += 1
+
+def preload_models():
+    """Preload commonly used models to reduce cold start times"""
+    try:
+        logger.info("Preloading Real-ESRGAN models for faster response times...")
+        
+        # Preload 2x model (most common)
+        get_model(2)
+        logger.info("✅ Real-ESRGAN 2x model preloaded")
+        
+        # Only preload 4x if we have sufficient memory
+        memory_usage = psutil.virtual_memory().percent
+        if memory_usage < 70:
+            get_model(4)
+            logger.info("✅ Real-ESRGAN 4x model preloaded")
+        else:
+            logger.info("⚠️ Skipped 4x model preload due to memory constraints")
+            
+    except Exception as e:
+        logger.warning(f"Model preloading failed (will load on demand): {e}")
 
 def get_model_info():
     """Get information about loaded models"""

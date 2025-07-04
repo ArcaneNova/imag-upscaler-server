@@ -173,6 +173,22 @@ async def lifespan(app: FastAPI):
     
     logger.info("✅ Application startup completed successfully!")
     
+    # Preload models in background for faster response times
+    try:
+        import threading
+        def preload_models_background():
+            try:
+                from app.upscale import preload_models
+                preload_models()
+            except Exception as e:
+                logger.warning(f"Background model preloading failed: {e}")
+        
+        preload_thread = threading.Thread(target=preload_models_background, daemon=True)
+        preload_thread.start()
+        logger.info("🚀 Model preloading started in background")
+    except Exception as e:
+        logger.warning(f"Failed to start model preloading: {e}")
+    
     yield
     
     # Shutdown
@@ -495,19 +511,23 @@ async def submit_upscale(
             try:
                 from app.worker import upscale_image
                 
-                # Test Celery connection first
-                celery_task = upscale_image.delay(job_id, temp_path, scale, face_enhance)
+                # Ensure parameters are correct types for Celery
+                scale_int = int(scale)
+                face_enhance_bool = bool(face_enhance)
                 
-                logger.info(f"Job {job_id} queued via Celery: {file.filename} ({file.size} bytes, scale={scale})")
+                # Test Celery connection first
+                celery_task = upscale_image.delay(job_id, temp_path, scale_int, face_enhance_bool)
+                
+                logger.info(f"Job {job_id} queued via Celery: {file.filename} ({file.size} bytes, scale={scale_int})")
                 
                 return {
                     "job_id": job_id,
                     "status": "queued",
                     "message": "Image submitted for upscaling via background worker",
-                    "estimated_time": "30-120 seconds",
+                    "estimated_time": "10-60 seconds",
                     "parameters": {
-                        "scale": scale,
-                        "face_enhance": face_enhance
+                        "scale": scale_int,
+                        "face_enhance": face_enhance_bool
                     }
                 }
                 

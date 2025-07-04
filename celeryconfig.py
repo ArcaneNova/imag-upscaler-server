@@ -20,12 +20,17 @@ accept_content = ["json"]
 timezone = "UTC"
 enable_utc = True
 
-# Worker settings for optimal performance
+# Worker settings for optimal performance and throughput
 worker_prefetch_multiplier = 1  # Process one task at a time to avoid memory issues
-worker_max_tasks_per_child = 50  # Restart worker after 50 tasks to prevent memory leaks
-worker_disable_rate_limits = False
+worker_max_tasks_per_child = 20  # Restart worker more frequently to prevent memory leaks
+worker_disable_rate_limits = True  # Disable rate limits for maximum throughput
 worker_acks_late = True  # Acknowledge tasks after completion
 worker_reject_on_worker_lost = True
+worker_max_memory_per_child = 400000  # 400MB memory limit per worker (restarts if exceeded)
+
+# Concurrency settings for high load
+worker_concurrency = None  # Use CPU count by default
+worker_pool = "prefork"  # Use prefork pool for better isolation
 
 # Task routing and priority
 task_routes = {
