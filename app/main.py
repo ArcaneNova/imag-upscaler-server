@@ -603,7 +603,6 @@ async def submit_upscale(
                         status_code=500,
                         detail=f"Both Celery and fallback processing failed: {str(fallback_err)}"
                     )
-            }
         
     except Exception as e:
         logger.error(f"Error submitting job: {e}")
