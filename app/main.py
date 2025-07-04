@@ -366,14 +366,14 @@ async def submit_upscale(
                     break
                 await f.write(chunk)
         
-        # Prepare job data
+        # Prepare job data - convert booleans to strings for Redis compatibility
         job_data = {
             "status": "queued",
             "filename": file.filename,
             "content_type": file.content_type,
             "file_size": file.size,
             "scale": scale,
-            "face_enhance": face_enhance,
+            "face_enhance": str(face_enhance),  # Convert boolean to string
             "created_at": timestamp,
             "temp_path": temp_path
         }
@@ -384,13 +384,13 @@ async def submit_upscale(
             redis_client.hset(f"job:{job_id}", mapping=job_data)
             redis_client.expire(f"job:{job_id}", 86400)  # 24 hours
             
-            # Add to processing queue with priority
+            # Add to processing queue with priority - convert boolean to string
             queue_data = {
                 "job_id": job_id,
                 "priority": 1 if face_enhance else 0,  # Higher priority for face enhancement
                 "timestamp": timestamp
             }
-            redis_client.lpush("processing_queue", f"{job_id}|{scale}|{face_enhance}")
+            redis_client.lpush("processing_queue", f"{job_id}|{scale}|{str(face_enhance)}")
             
             # Update queue stats
             redis_client.incr("stats:total_jobs")
@@ -458,7 +458,7 @@ async def submit_upscale(
                         "status": "completed",
                         "completed_at": completion_time,
                         "processing_time": processing_time,
-                        "result_url": cloudinary_url,
+                        "result_url": cloudinary_url or "",
                         "output_path": output_path
                     }
                     redis_client.hset(f"job:{job_id}", mapping=result_data)

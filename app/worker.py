@@ -162,7 +162,7 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 "completed_at": time.time(),
                 "output_size": output_size,
                 "scale_used": scale,
-                "face_enhance_used": face_enhance,
+                "face_enhance_used": str(face_enhance),  # Convert boolean to string
                 "compression_ratio": round(output_size / file_size, 2) if file_size > 0 else 0
             }
             
