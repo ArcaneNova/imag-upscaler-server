@@ -45,7 +45,9 @@ RUN mkdir -p temp output weights logs \
 
 # Copy application code including startup script
 COPY . .
-RUN chmod +x start-api.sh entrypoint.sh
+RUN chmod +x start-api.sh entrypoint.sh && \
+    ls -la entrypoint.sh && \
+    head -5 entrypoint.sh
 
 # Set ownership
 RUN chown -R appuser:appuser /app
@@ -82,4 +84,4 @@ EXPOSE 8000 6379
 # Startup script already copied and made executable above
 
 # Default command for API server
-CMD ["./entrypoint.sh"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

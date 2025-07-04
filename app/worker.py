@@ -35,49 +35,41 @@ cloudinary.config(
 
 @contextmanager
 def redis_connection():
-    """Context manager for Redis connections with fallback to None"""
+    """Context manager for local Redis connections only"""
     from redis import Redis
     redis_client = None
     
-    # Check if Redis is disabled by environment variable
-    if os.getenv("REDIS_DISABLE", "").lower() in ("true", "1", "yes"):
-        logger.warning("Redis disabled by environment variable - operating in local mode")
-        yield None
-        return
-        
     try:
-        # Get Redis host with multiple fallback options
-        redis_host = os.getenv("REDIS_HOST", "redis")
-        redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        
-        # Check if we're running in a local development environment
-        if redis_host == "redis" and not os.getenv("DOCKER_CONTAINER"):
-            # Try localhost as fallback for local development
-            try:
-                test_client = Redis(
-                    host="localhost",
-                    port=redis_port,
-                    socket_timeout=2,
-                    decode_responses=True
-                )
-                test_client.ping()
-                logger.info("Using localhost Redis connection for local development")
-                redis_host = "localhost"
-                test_client.close()
-            except Exception:
-                # Localhost also failed, will continue with original host
-                pass
+        # Always use local Redis at 127.0.0.1:6379
+        logger.info("Connecting to local Redis at 127.0.0.1:6379")
         
         redis_client = Redis(
-            host=redis_host,
-            port=redis_port,
+            host="127.0.0.1",
+            port=6379,
             decode_responses=True,
             socket_timeout=5,
             socket_connect_timeout=5,
             retry_on_timeout=True,
             health_check_interval=15
         )
+        
         # Test the connection with a ping
+        redis_client.ping()
+        logger.info("Successfully connected to local Redis")
+        
+        yield redis_client
+        
+    except Exception as e:
+        logger.error(f"Failed to connect to local Redis: {e}")
+        logger.warning("Operating without Redis - job status tracking disabled")
+        yield None
+        
+    finally:
+        if redis_client:
+            try:
+                redis_client.close()
+            except Exception:
+                pass
         redis_client.ping()
         logger.info(f"Connected to Redis at {redis_host}:{redis_port}")
         yield redis_client
