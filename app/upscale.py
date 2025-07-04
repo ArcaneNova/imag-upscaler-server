@@ -219,7 +219,7 @@ def preprocess_image(image: Image.Image, max_dimension: int = 2048) -> Image.Ima
     return image
 
 def enhance_face_regions(image: Image.Image) -> Image.Image:
-    """Apply additional face enhancement if requested"""
+    """Apply advanced face enhancement for better quality"""
     try:
         # Convert PIL to OpenCV format
         cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -227,26 +227,36 @@ def enhance_face_regions(image: Image.Image) -> Image.Image:
         # Load face detection model
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         
-        # Detect faces
+        # Detect faces with better parameters
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=5, minSize=(30, 30))
         
         if len(faces) > 0:
             logger.info(f"Detected {len(faces)} face(s) for enhancement")
             
             for (x, y, w, h) in faces:
-                # Extract face region
-                face_region = cv_image[y:y+h, x:x+w]
+                # Extract face region with some padding
+                padding = max(5, min(w, h) // 20)
+                x1, y1 = max(0, x - padding), max(0, y - padding)
+                x2, y2 = min(cv_image.shape[1], x + w + padding), min(cv_image.shape[0], y + h + padding)
                 
-                # Apply additional sharpening to face
-                kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+                face_region = cv_image[y1:y2, x1:x2]
+                
+                # Apply gentle sharpening
+                kernel = np.array([[0,-1,0], [-1,5,-1], [0,-1,0]]) / 1.0
                 sharpened = cv2.filter2D(face_region, -1, kernel)
                 
-                # Blend original and sharpened (70% sharpened, 30% original)
-                blended = cv2.addWeighted(face_region, 0.3, sharpened, 0.7, 0)
+                # Apply noise reduction using bilateral filter
+                denoised = cv2.bilateralFilter(face_region, 9, 75, 75)
+                
+                # Blend: 40% original, 40% sharpened, 20% denoised
+                enhanced = cv2.addWeighted(
+                    cv2.addWeighted(face_region, 0.4, sharpened, 0.4, 0),
+                    0.8, denoised, 0.2, 0
+                )
                 
                 # Replace face region
-                cv_image[y:y+h, x:x+w] = blended
+                cv_image[y1:y2, x1:x2] = enhanced
             
             # Convert back to PIL
             enhanced_image = Image.fromarray(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
@@ -260,24 +270,28 @@ def enhance_face_regions(image: Image.Image) -> Image.Image:
         return image
 
 def postprocess_image(image: Image.Image, face_enhance: bool = False) -> Image.Image:
-    """Apply fast post-processing enhancements"""
+    """Apply high-quality post-processing enhancements"""
     
     try:
         # Only do face enhancement if explicitly requested
         if face_enhance:
             image = enhance_face_regions(image)
         
-        # Skip heavy processing for faster results - only apply very light enhancements
-        # Apply subtle sharpening (reduced intensity for speed)
-        image = image.filter(ImageFilter.UnsharpMask(radius=0.8, percent=105, threshold=3))
+        # Apply careful sharpening to enhance details without overdoing it
+        # Real-ESRGAN output is already quite sharp, so be gentle
+        image = image.filter(ImageFilter.UnsharpMask(radius=0.5, percent=120, threshold=5))
         
-        # Very light color enhancement (reduced for speed)
+        # Very subtle color enhancement to make colors more vibrant without oversaturation
         enhancer = ImageEnhance.Color(image)
-        image = enhancer.enhance(1.02)  # 2% color boost instead of 5%
+        image = enhancer.enhance(1.05)  # 5% color boost
         
-        # Light contrast enhancement
+        # Slight contrast enhancement for better depth
         enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(1.01)  # 1% contrast boost instead of 2%
+        image = enhancer.enhance(1.03)  # 3% contrast boost
+        
+        # Brightness adjustment for better overall appearance
+        enhancer = ImageEnhance.Brightness(image)
+        image = enhancer.enhance(1.01)  # 1% brightness boost
         
         return image
         
@@ -394,38 +408,55 @@ def run_upscale(
         after_upscale_memory = psutil.virtual_memory().percent
         logger.info(f"Upscaling completed. Memory: {before_upscale_memory}% -> {after_upscale_memory}%")
         
-        # Fast conversion to PIL (avoid unnecessary color space conversions when possible)
+        # Proper color space conversion - Real-ESRGAN outputs BGR format
+        logger.info(f"Output shape: {output.shape}")
+        
         if len(output.shape) == 3 and output.shape[2] == 3:
-            # RGB format
-            upscaled_img = Image.fromarray(output.astype('uint8'), 'RGB')
-        elif len(output.shape) == 3 and output.shape[2] == 4:
-            # RGBA format
-            upscaled_img = Image.fromarray(output.astype('uint8'), 'RGBA')
-        else:
-            # Fallback: convert BGR to RGB
+            # Convert BGR to RGB (Real-ESRGAN default output)
             output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
-            upscaled_img = Image.fromarray(output_rgb)
+            upscaled_img = Image.fromarray(output_rgb.astype('uint8'), 'RGB')
+            logger.info("Converted BGR to RGB")
+        elif len(output.shape) == 3 and output.shape[2] == 4:
+            # Convert BGRA to RGBA
+            output_rgba = cv2.cvtColor(output, cv2.COLOR_BGRA2RGBA)
+            upscaled_img = Image.fromarray(output_rgba.astype('uint8'), 'RGBA')
+            logger.info("Converted BGRA to RGBA")
+        else:
+            # Fallback: assume it's already RGB (shouldn't happen with Real-ESRGAN)
+            upscaled_img = Image.fromarray(output.astype('uint8'))
+            logger.warning("Using output as-is (no color conversion)")
         
         # Clean up output array immediately
         del output
         
-        # Apply post-processing only when needed (simplified logic)
+        # Apply post-processing for better quality (always apply light enhancement)
         if face_enhance:
-            # Only do face enhancement if explicitly requested
+            # Full enhancement including face detection
             upscaled_img = postprocess_image(upscaled_img, face_enhance)
-        elif scale == 4:
-            # Light post-process 4x images for quality
+        else:
+            # Light enhancement for all images to improve quality
             upscaled_img = postprocess_image(upscaled_img, False)
         
-        # Save result with optimized settings
+        # Save result with high quality settings
         final_size = upscaled_img.size
         
-        # Use PNG with reasonable compression for consistent quality
+        # Use PNG with optimal settings for best quality
         save_kwargs = {
             "format": "PNG",
-            "optimize": False,  # Skip optimization for speed
-            "compress_level": 6  # Balanced compression
+            "optimize": True,  # Enable optimization for better compression
+            "compress_level": 6  # Good balance of compression and speed
         }
+        
+        # For very large images, consider using high-quality JPEG
+        if final_size[0] * final_size[1] > 16_000_000:  # > 16MP
+            save_kwargs = {
+                "format": "JPEG",
+                "quality": 98,  # Very high quality
+                "optimize": True,
+                "progressive": True  # Progressive JPEG for better loading
+            }
+            output_path = output_path.replace('.png', '.jpg')
+            logger.info("Using high-quality JPEG for very large image")
         
         upscaled_img.save(output_path, **save_kwargs)
         

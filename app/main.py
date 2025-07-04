@@ -382,15 +382,15 @@ async def submit_upscale(
                     break
                 await f.write(chunk)
         
-        # Prepare job data - convert booleans to strings for Redis compatibility
+        # Prepare job data - convert all values to strings for Redis compatibility
         job_data = {
             "status": "queued",
             "filename": file.filename,
             "content_type": file.content_type,
-            "file_size": file.size,
-            "scale": scale,
+            "file_size": str(file.size),  # Convert to string
+            "scale": str(scale),  # Convert to string
             "face_enhance": str(face_enhance),  # Convert boolean to string
-            "created_at": timestamp,
+            "created_at": str(timestamp),  # Convert to string
             "temp_path": temp_path
         }
         
@@ -472,8 +472,8 @@ async def submit_upscale(
                 if redis_client:
                     result_data = {
                         "status": "completed",
-                        "completed_at": completion_time,
-                        "processing_time": processing_time,
+                        "completed_at": str(completion_time),  # Convert to string
+                        "processing_time": str(processing_time),  # Convert to string
                         "result_url": cloudinary_url or "",
                         "output_path": output_path
                     }
@@ -589,8 +589,8 @@ async def submit_upscale(
                     if redis_client:
                         result_data = {
                             "status": "completed",
-                            "completed_at": completion_time,
-                            "processing_time": processing_time,
+                            "completed_at": str(completion_time),  # Convert to string
+                            "processing_time": str(processing_time),  # Convert to string
                             "result_url": cloudinary_url or "",
                             "output_path": output_path
                         }
