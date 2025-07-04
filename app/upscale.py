@@ -133,7 +133,7 @@ def get_model(scale: int = 2):
             logger.info(f"Model weights file exists: {model_path} ({os.path.getsize(model_path)} bytes)")
             
             # Optimize tile size based on available memory and device
-            # Larger tiles are faster but use more memory
+            # Conservative tile sizes for reliable performance
             tile_size = 512
             tile_pad = 10
             
@@ -142,35 +142,31 @@ def get_model(scale: int = 2):
                 try:
                     gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
                     if gpu_memory >= 8:
-                        tile_size = 1024  # Large tiles for high-end GPUs
-                        tile_pad = 16
-                    elif gpu_memory >= 4:
-                        tile_size = 768   # Medium tiles for mid-range GPUs
+                        tile_size = 768   # Conservative for high-end GPUs
                         tile_pad = 12
-                    else:
-                        tile_size = 512   # Standard tiles for entry-level GPUs
+                    elif gpu_memory >= 4:
+                        tile_size = 512   # Standard for mid-range GPUs
                         tile_pad = 10
+                    else:
+                        tile_size = 384   # Smaller for entry-level GPUs
+                        tile_pad = 8
                 except:
                     tile_size = 512
                     tile_pad = 10
             else:
-                # CPU optimization: balance between speed and memory
-                cpu_count = os.cpu_count() or 4
-                if cpu_count >= 16 and current_memory < 70:
-                    tile_size = 768   # Larger tiles for powerful CPUs with plenty of RAM
-                    tile_pad = 12
-                elif cpu_count >= 8 and current_memory < 75:
-                    tile_size = 640   # Medium tiles for decent CPUs
-                    tile_pad = 10
-                elif current_memory > 80:
+                # CPU optimization: smaller tiles are often better for CPU
+                if current_memory > 85:
                     tile_size = 256   # Small tiles when memory constrained
                     tile_pad = 8
+                elif current_memory > 75:
+                    tile_size = 384   # Medium-small tiles for moderate memory
+                    tile_pad = 8  
                 else:
-                    tile_size = 512   # Default balanced setting
+                    tile_size = 512   # Standard for good memory availability
                     tile_pad = 10
                     
-            logger.info(f"Using optimized tile size: {tile_size} (pad: {tile_pad}) for {device}")
-            logger.info(f"System: CPU cores={os.cpu_count()}, Memory={current_memory}%")
+            logger.info(f"Using tile size: {tile_size} (pad: {tile_pad}) for {device}")
+            logger.info(f"System: Memory={current_memory}%")
             
             logger.info(f"Creating model architecture: {model_arch}")
             logger.info(f"Model device: {device}, netscale: {netscale}")
@@ -294,7 +290,7 @@ def run_upscale(
     output_path: str, 
     scale: int = 2, 
     face_enhance: bool = False,
-    max_dimension: int = 1536  # Reduced from 2048 for better speed
+    max_dimension: int = 2048  # Restored original default for better quality
 ):
     """
     Enhanced upscale function with optimizations and improved memory management
@@ -341,21 +337,14 @@ def run_upscale(
         original_height, original_width = img.shape[:2]
         logger.info(f"Input image: {original_width}x{original_height}")
         
-        # Check and resize if too large - optimize for processing speed
-        original_pixels = original_width * original_height
+        # Check and resize if too large - use efficient interpolation
         if max(original_width, original_height) > max_dimension:
             ratio = max_dimension / max(original_width, original_height)
             new_width = int(original_width * ratio)
             new_height = int(original_height * ratio)
-            # Use faster interpolation for speed
-            img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+            # Use INTER_AREA which is good for downsampling
+            img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
             logger.info(f"Resized image from {original_width}x{original_height} to {new_width}x{new_height}")
-        
-        # For very large images, use even more aggressive optimization
-        current_pixels = img.shape[1] * img.shape[0]
-        if current_pixels > 2073600:  # > 1920x1080
-            logger.info("Large image detected - using speed-optimized processing")
-            # We'll pass this info to the model for optimization
         
         # Get model and perform upscaling
         model = get_model(scale)
@@ -420,55 +409,23 @@ def run_upscale(
         # Clean up output array immediately
         del output
         
-        # Determine if we should use fast mode based on system load
-        fast_mode = False
-        if _upscale_counter > 5:  # If we've processed multiple images recently
-            current_load = psutil.cpu_percent(interval=0.1)
-            if current_load > 70 or after_upscale_memory > 80:
-                fast_mode = True
-                logger.info("Using fast mode due to high system load")
-        
-        # Apply post-processing based on mode
-        if fast_mode:
-            # Skip post-processing for maximum speed
-            logger.info("Skipping post-processing for maximum throughput")
-        elif face_enhance:
+        # Apply post-processing only when needed (simplified logic)
+        if face_enhance:
             # Only do face enhancement if explicitly requested
             upscaled_img = postprocess_image(upscaled_img, face_enhance)
         elif scale == 4:
             # Light post-process 4x images for quality
             upscaled_img = postprocess_image(upscaled_img, False)
         
-        # Save result with speed-optimized settings
+        # Save result with optimized settings
         final_size = upscaled_img.size
-        output_pixels = final_size[0] * final_size[1]
         
-        # Choose format and settings based on size and performance requirements
-        if fast_mode or output_pixels > 8_000_000:  # > 8MP or fast mode
-            # Use JPEG for faster saving of large images
-            output_path = output_path.replace('.png', '.jpg')
-            save_kwargs = {
-                "format": "JPEG",
-                "quality": 92,  # Good quality but faster than 95
-                "optimize": False  # Skip optimization for speed
-            }
-            logger.info("Using JPEG format for faster processing")
-        elif output_pixels > 16_000_000:  # > 16MP
-            # Use JPEG with optimization for very large images
-            output_path = output_path.replace('.png', '.jpg')
-            save_kwargs = {
-                "format": "JPEG",
-                "quality": 95,
-                "optimize": True
-            }
-            logger.info("Using optimized JPEG format for very large image")
-        else:
-            # Use PNG with light compression for smaller images
-            save_kwargs = {
-                "format": "PNG",
-                "optimize": False,  # Skip optimization for speed
-                "compress_level": 3  # Light compression for speed
-            }
+        # Use PNG with reasonable compression for consistent quality
+        save_kwargs = {
+            "format": "PNG",
+            "optimize": False,  # Skip optimization for speed
+            "compress_level": 6  # Balanced compression
+        }
         
         upscaled_img.save(output_path, **save_kwargs)
         

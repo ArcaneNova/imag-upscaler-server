@@ -82,8 +82,8 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
             if redis_client:
                 redis_client.hset(f"job:{job_id}", mapping={
                     "status": "processing",
-                    "processing_started": start_time,
-                    "worker_pid": os.getpid()
+                    "processing_started": str(start_time),
+                    "worker_pid": str(os.getpid())
                 })
                 redis_client.decr("stats:queued_jobs")
             
@@ -156,14 +156,14 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 "result_url": upload_result["secure_url"],
                 "cloudinary_id": upload_result["public_id"],
                 "cloudinary_url": upload_result["url"],
-                "processing_time": round(total_time, 2),
-                "upscale_time": round(upscale_time, 2),
-                "upload_time": round(upload_time, 2),
-                "completed_at": time.time(),
-                "output_size": output_size,
-                "scale_used": scale,
+                "processing_time": str(round(total_time, 2)),
+                "upscale_time": str(round(upscale_time, 2)),
+                "upload_time": str(round(upload_time, 2)),
+                "completed_at": str(time.time()),
+                "output_size": str(output_size),
+                "scale_used": str(scale),
                 "face_enhance_used": str(face_enhance),  # Convert boolean to string
-                "compression_ratio": round(output_size / file_size, 2) if file_size > 0 else 0
+                "compression_ratio": str(round(output_size / file_size, 2) if file_size > 0 else 0)
             }
             
             # Update Redis if available
@@ -172,7 +172,7 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 
                 # Update statistics
                 redis_client.incr("stats:completed_jobs")
-                redis_client.lpush("stats:processing_times", total_time)
+                redis_client.lpush("stats:processing_times", str(total_time))
                 redis_client.ltrim("stats:processing_times", 0, 99)  # Keep last 100 times
             else:
                 # Log result when Redis isn't available
@@ -202,9 +202,9 @@ def upscale_image(self, job_id: str, input_path: str, scale: int = 2, face_enhan
                 "status": "failed",
                 "error": str(exc),
                 "error_type": type(exc).__name__,
-                "failed_at": time.time(),
-                "processing_time": round(error_time, 2),
-                "worker_pid": os.getpid()
+                "failed_at": str(time.time()),
+                "processing_time": str(round(error_time, 2)),
+                "worker_pid": str(os.getpid())
             }
             
             # Update Redis if available
