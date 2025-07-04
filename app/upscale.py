@@ -80,6 +80,39 @@ def get_model(scale: int = 2):
             models_dir = os.path.join(os.getcwd(), 'weights')
             os.makedirs(models_dir, exist_ok=True)
             
+            # Define model path
+            model_path = os.path.join(models_dir, f'{model_name}.pth')
+            
+            # Download model weights if they don't exist
+            if not os.path.exists(model_path):
+                logger.info(f"Model weights not found, downloading {model_name}")
+                
+                # Model URLs based on the official repo
+                model_urls = {
+                    'RealESRGAN_x4plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth',
+                    'RealESRGAN_x2plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth'
+                }
+                
+                # Download weights
+                if model_name in model_urls:
+                    try:
+                        load_file_from_url(
+                            url=model_urls[model_name],
+                            model_dir=models_dir,
+                            progress=True,
+                            file_name=f'{model_name}.pth'
+                        )
+                        logger.info(f"Successfully downloaded {model_name}.pth")
+                    except Exception as download_err:
+                        logger.error(f"Failed to download model weights: {download_err}")
+                        raise RuntimeError(f"Could not download model weights for {model_name}")
+                else:
+                    raise ValueError(f"No download URL available for model {model_name}")
+            
+            # Verify model file exists after download
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model file not found after download: {model_path}")
+            
             # Optimize tile size based on available memory
             # Smaller tiles use less memory but may be slower
             tile_size = 512
@@ -90,7 +123,7 @@ def get_model(scale: int = 2):
             # Initialize RealESRGANer with memory-optimized parameters
             model = RealESRGANer(
                 scale=netscale,
-                model_path=os.path.join(models_dir, f'{model_name}.pth'),
+                model_path=model_path,
                 dni_weight=None,
                 model=None,  # Let the library create the appropriate model
                 half=device == 'cuda',  # Use half precision for CUDA
@@ -100,25 +133,6 @@ def get_model(scale: int = 2):
                 device=device
             )
             
-            # Ensure the model file exists
-            if not os.path.exists(model.model_path):
-                logger.info(f"Downloading model weights for {model_name}")
-                
-                # Model URLs based on the official repo
-                model_urls = {
-                    'RealESRGAN_x4plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth',
-                    'RealESRGAN_x2plus': 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth'
-                }
-                
-                # Download weights if needed
-                if model_name in model_urls:
-                    load_file_from_url(
-                        url=model_urls[model_name],
-                        model_dir=models_dir,
-                        progress=True,
-                        file_name=f'{model_name}.pth'
-                    )
-                
             _models[model_key] = model
             logger.info(f"Real-ESRGAN {scale}x model loaded on {device}")
             
