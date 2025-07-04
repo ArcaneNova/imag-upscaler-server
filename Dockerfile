@@ -74,14 +74,14 @@ RUN ls -la /app/app/ || echo "App/app directory listing failed"
 # Switch to non-root user
 USER appuser
 
-# Health check
+# Health check - try both common ports
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:8000/ping || exit 1
+    CMD curl -f http://localhost:8000/ || curl -f http://localhost:3000/ || exit 1
 
 # Expose ports
 EXPOSE 8000 6379
 
 # Startup script already copied and made executable above
 
-# Default command for API server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Default command for API server - use Railway's PORT if available
+CMD ["./entrypoint.sh"]

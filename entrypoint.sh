@@ -94,5 +94,9 @@ fi
 
 echo "✓ Starting uvicorn server..."
 
+# Use Railway's PORT environment variable if available, otherwise default to 8000
+PORT=${PORT:-8000}
+echo "Starting uvicorn on port $PORT"
+
 # Start the FastAPI application
-exec uvicorn main:app --host 0.0.0.0 --port 8000 --workers $WORKERS
+exec uvicorn main:app --host 0.0.0.0 --port $PORT --workers $WORKERS

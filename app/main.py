@@ -173,13 +173,15 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Root endpoint that redirects to docs
-from fastapi.responses import RedirectResponse
-
+# Root endpoint that returns simple health status
 @app.get("/")
 async def root():
-    """Redirect to API documentation"""
-    return RedirectResponse(url="/docs")
+    """Simple root endpoint for health checks"""
+    return {
+        "service": "realesrgan-api", 
+        "status": "healthy",
+        "docs": "/docs"
+    }
 
 @app.get("/ping")
 async def ping():
